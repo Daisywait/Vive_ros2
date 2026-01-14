@@ -10,6 +10,9 @@ from std_srvs.srv import Trigger
 
 from scipy.spatial.transform import Rotation as R
 import numpy as np
+import csv
+import os
+from datetime import datetime
 
 import tf2_ros
 from tf2_ros import TransformException
@@ -118,6 +121,12 @@ class FR3VRTeleopFull(Node):
         self.declare_parameter('gripper_rate', 15.0)              # 发送频率 Hz
         self.declare_parameter('gripper_deadband', 0.01)          # 位置变化小于此不发
 
+        # ✅ 调试参数
+        self.declare_parameter('debug_enabled', True)             # 是否启用调试日志
+        self.declare_parameter('debug_log_rate', 10.0)            # 日志打印频率 Hz
+        self.declare_parameter('record_to_file', True)            # 是否记录到文件
+        self.declare_parameter('record_dir', '~/ros2_ws/tmp/vr_teleop_debug')  # 记录文件目录
+
         # 运动控制状态变量
         self.is_controlling = False
 
@@ -136,6 +145,12 @@ class FR3VRTeleopFull(Node):
         self._gripper_target_pos = float(self.get_parameter('gripper_open_pos').value)
         self._last_gripper_send_time = 0.0
         self._last_gripper_pos_sent = None
+
+        # ✅ 调试状态变量
+        self._last_debug_log_time = 0.0
+        self._debug_csv_file = None
+        self._debug_csv_writer = None
+        self._init_debug_recording()
 
         # ================== 2. 通信接口 ==================
         qos = QoSProfile(depth=10)
@@ -165,6 +180,133 @@ class FR3VRTeleopFull(Node):
         self.timer_twist = self.create_timer(1.0 / self.publish_rate, self.publish_twist)
 
         self.get_logger().info("✅ Pose→Twist 闭环版本启动：使用 trackpad_y 进行夹爪连续控制")
+
+    # ================== 调试记录初始化 ==================
+    def _init_debug_recording(self):
+        if not self.get_parameter('record_to_file').value:
+            return
+
+        record_dir = self.get_parameter('record_dir').value
+        os.makedirs(record_dir, exist_ok=True)
+
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        csv_path = os.path.join(record_dir, f'teleop_debug_{timestamp}.csv')
+
+        self._debug_csv_file = open(csv_path, 'w', newline='')
+        self._debug_csv_writer = csv.writer(self._debug_csv_file)
+
+        # 写入表头
+        header = [
+            'timestamp',
+            # VR原始数据
+            'vr_raw_x', 'vr_raw_y', 'vr_raw_z',
+            'vr_raw_qx', 'vr_raw_qy', 'vr_raw_qz', 'vr_raw_qw',
+            # VR锚点
+            'vr_anchor_x', 'vr_anchor_y', 'vr_anchor_z',
+            'vr_anchor_qx', 'vr_anchor_qy', 'vr_anchor_qz', 'vr_anchor_qw',
+            # VR相对变化
+            'dvr_x', 'dvr_y', 'dvr_z',
+            'dvr_qx', 'dvr_qy', 'dvr_qz', 'dvr_qw',
+            # 映射后机器人坐标系变化
+            'dp_robot_x', 'dp_robot_y', 'dp_robot_z',
+            'rotvec_robot_x', 'rotvec_robot_y', 'rotvec_robot_z',
+            # EE锚点
+            'ee_anchor_x', 'ee_anchor_y', 'ee_anchor_z',
+            'ee_anchor_qx', 'ee_anchor_qy', 'ee_anchor_qz', 'ee_anchor_qw',
+            # 当前EE位姿
+            'ee_cur_x', 'ee_cur_y', 'ee_cur_z',
+            'ee_cur_qx', 'ee_cur_qy', 'ee_cur_qz', 'ee_cur_qw',
+            # 期望EE位姿
+            'ee_des_x', 'ee_des_y', 'ee_des_z',
+            'ee_des_qx', 'ee_des_qy', 'ee_des_qz', 'ee_des_qw',
+            # 误差
+            'pos_err_x', 'pos_err_y', 'pos_err_z',
+            'rot_err_x', 'rot_err_y', 'rot_err_z',
+            # 控制输出
+            'v_cmd_x', 'v_cmd_y', 'v_cmd_z',
+            'w_cmd_x', 'w_cmd_y', 'w_cmd_z',
+            # 最终twist
+            'twist_vx', 'twist_vy', 'twist_vz',
+            'twist_wx', 'twist_wy', 'twist_wz',
+            # 状态
+            'is_controlling', 'anchor_set'
+        ]
+        self._debug_csv_writer.writerow(header)
+        self.get_logger().info(f"📝 调试数据将记录到: {csv_path}")
+
+    def _record_debug_data(self, data: dict):
+        """记录一行调试数据到CSV"""
+        if self._debug_csv_writer is None:
+            return
+
+        row = [
+            data.get('timestamp', 0.0),
+            # VR原始
+            *data.get('vr_raw_p', [0, 0, 0]),
+            *data.get('vr_raw_q', [0, 0, 0, 1]),
+            # VR锚点
+            *data.get('vr_anchor_p', [0, 0, 0]),
+            *data.get('vr_anchor_q', [0, 0, 0, 1]),
+            # VR变化
+            *data.get('dvr_p', [0, 0, 0]),
+            *data.get('dvr_q', [0, 0, 0, 1]),
+            # 映射后
+            *data.get('dp_robot', [0, 0, 0]),
+            *data.get('rotvec_robot', [0, 0, 0]),
+            # EE锚点
+            *data.get('ee_anchor_p', [0, 0, 0]),
+            *data.get('ee_anchor_q', [0, 0, 0, 1]),
+            # 当前EE
+            *data.get('ee_cur_p', [0, 0, 0]),
+            *data.get('ee_cur_q', [0, 0, 0, 1]),
+            # 期望EE
+            *data.get('ee_des_p', [0, 0, 0]),
+            *data.get('ee_des_q', [0, 0, 0, 1]),
+            # 误差
+            *data.get('pos_err', [0, 0, 0]),
+            *data.get('rot_err', [0, 0, 0]),
+            # 控制输出
+            *data.get('v_cmd', [0, 0, 0]),
+            *data.get('w_cmd', [0, 0, 0]),
+            # 最终twist
+            *data.get('twist_v', [0, 0, 0]),
+            *data.get('twist_w', [0, 0, 0]),
+            # 状态
+            data.get('is_controlling', False),
+            data.get('anchor_set', False)
+        ]
+        self._debug_csv_writer.writerow(row)
+        self._debug_csv_file.flush()
+
+    def _log_debug_info(self, data: dict):
+        """打印调试日志（限频）"""
+        if not self.get_parameter('debug_enabled').value:
+            return
+
+        now = self.get_clock().now().nanoseconds * 1e-9
+        rate = self.get_parameter('debug_log_rate').value
+        if (now - self._last_debug_log_time) < (1.0 / rate):
+            return
+        self._last_debug_log_time = now
+
+        vr_raw = data.get('vr_raw_p', [0, 0, 0])
+        dvr = data.get('dvr_p', [0, 0, 0])
+        dp_robot = data.get('dp_robot', [0, 0, 0])
+        ee_cur = data.get('ee_cur_p', [0, 0, 0])
+        ee_des = data.get('ee_des_p', [0, 0, 0])
+        pos_err = data.get('pos_err', [0, 0, 0])
+        v_cmd = data.get('v_cmd', [0, 0, 0])
+        twist_v = data.get('twist_v', [0, 0, 0])
+
+        self.get_logger().info("=" * 60)
+        self.get_logger().info(f"[VR原始]   p=({vr_raw[0]:+.4f}, {vr_raw[1]:+.4f}, {vr_raw[2]:+.4f})")
+        self.get_logger().info(f"[VR变化]   dvr=({dvr[0]:+.4f}, {dvr[1]:+.4f}, {dvr[2]:+.4f})")
+        self.get_logger().info(f"[映射后]   dp_robot=({dp_robot[0]:+.4f}, {dp_robot[1]:+.4f}, {dp_robot[2]:+.4f})")
+        self.get_logger().info(f"[当前EE]   p=({ee_cur[0]:+.4f}, {ee_cur[1]:+.4f}, {ee_cur[2]:+.4f})")
+        self.get_logger().info(f"[期望EE]   p=({ee_des[0]:+.4f}, {ee_des[1]:+.4f}, {ee_des[2]:+.4f})")
+        self.get_logger().info(f"[误差]     pos_err=({pos_err[0]:+.4f}, {pos_err[1]:+.4f}, {pos_err[2]:+.4f})")
+        self.get_logger().info(f"[P控制]    v_cmd=({v_cmd[0]:+.4f}, {v_cmd[1]:+.4f}, {v_cmd[2]:+.4f})")
+        self.get_logger().info(f"[输出]     twist_v=({twist_v[0]:+.4f}, {twist_v[1]:+.4f}, {twist_v[2]:+.4f})")
 
     # ================== TF 读取当前末端 ==================
     def get_current_ee_pose(self):
@@ -367,6 +509,54 @@ class FR3VRTeleopFull(Node):
         self.target_twist.twist.angular.x = self.target_twist.twist.angular.x * (1 - alpha) + w_cmd[0] * alpha
         self.target_twist.twist.angular.y = self.target_twist.twist.angular.y * (1 - alpha) + w_cmd[1] * alpha
         self.target_twist.twist.angular.z = self.target_twist.twist.angular.z * (1 - alpha) + w_cmd[2] * alpha
+
+        # === 收集并记录调试数据 ===
+        debug_data = {
+            'timestamp': self.get_clock().now().nanoseconds * 1e-9,
+            # VR原始数据
+            'vr_raw_p': vr_p_now.tolist(),
+            'vr_raw_q': vr_q_now.tolist(),
+            # VR锚点
+            'vr_anchor_p': self.vr_anchor_p.tolist() if self.vr_anchor_p is not None else [0, 0, 0],
+            'vr_anchor_q': self.vr_anchor_q.tolist() if self.vr_anchor_q is not None else [0, 0, 0, 1],
+            # VR相对变化
+            'dvr_p': dvr_p.tolist(),
+            'dvr_q': dvr_q.tolist(),
+            # 映射后机器人坐标系变化
+            'dp_robot': dp_robot.tolist(),
+            'rotvec_robot': rotvec_robot.tolist(),
+            # EE锚点
+            'ee_anchor_p': self.ee_anchor_p.tolist() if self.ee_anchor_p is not None else [0, 0, 0],
+            'ee_anchor_q': self.ee_anchor_q.tolist() if self.ee_anchor_q is not None else [0, 0, 0, 1],
+            # 当前EE位姿
+            'ee_cur_p': ee_p.tolist(),
+            'ee_cur_q': ee_q.tolist(),
+            # 期望EE位姿
+            'ee_des_p': p_des.tolist(),
+            'ee_des_q': q_des.tolist(),
+            # 误差
+            'pos_err': pos_err.tolist(),
+            'rot_err': rotvec_err.tolist(),
+            # 控制输出
+            'v_cmd': v_cmd.tolist(),
+            'w_cmd': w_cmd.tolist(),
+            # 最终twist
+            'twist_v': [
+                self.target_twist.twist.linear.x,
+                self.target_twist.twist.linear.y,
+                self.target_twist.twist.linear.z
+            ],
+            'twist_w': [
+                self.target_twist.twist.angular.x,
+                self.target_twist.twist.angular.y,
+                self.target_twist.twist.angular.z
+            ],
+            # 状态
+            'is_controlling': self.is_controlling,
+            'anchor_set': self.anchor_set
+        }
+        self._record_debug_data(debug_data)
+        self._log_debug_info(debug_data)
 
     # ================== 停止时平滑归零 ==================
     def smooth_stop(self):
