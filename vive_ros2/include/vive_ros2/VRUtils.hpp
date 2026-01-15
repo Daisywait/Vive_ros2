@@ -352,29 +352,31 @@ public:
 
     /**
      * @brief Calculate relative pose between two controller states using Eigen
+     * Position: World coordinate system displacement (for robot teleoperation)
+     * Orientation: Relative rotation in controller frame
      */
-    static VRControllerData calculateRelativePose(const VRControllerData& initial, 
+    static VRControllerData calculateRelativePose(const VRControllerData& initial,
                                                   const VRControllerData& current) {
         VRControllerData relativePose;
         relativePose.role = current.role;  // Maintain controller role
-        
+
         // Get poses as Eigen objects
         Eigen::Vector3d initialPos = initial.getPosition();
         Eigen::Quaterniond initialQuat = initial.getQuaternion();
         Eigen::Vector3d currentPos = current.getPosition();
         Eigen::Quaterniond currentQuat = current.getQuaternion();
-        
-        // Calculate relative position and rotation
+
+        // Calculate relative position in WORLD coordinate system
+        // This is intuitive for robot teleoperation: move hand right → robot moves right
         Eigen::Vector3d relativePos = currentPos - initialPos;
+
+        // Calculate relative rotation (orientation change)
         Eigen::Quaterniond relativeQuat = initialQuat.inverse() * currentQuat;
-        
-        // Rotate relative position by inverse of initial quaternion
-        Eigen::Vector3d rotatedRelativePos = initialQuat.inverse() * relativePos;
-        
-        // Store results
-        relativePose.setPosition(rotatedRelativePos);
+
+        // Store results - position is in world frame, orientation is relative
+        relativePose.setPosition(relativePos);  // Direct world coordinate displacement
         relativePose.setQuaternion(relativeQuat);
-        
+
         // Copy button states
         relativePose.menu_button = current.menu_button;
         relativePose.trigger_button = current.trigger_button;
@@ -385,7 +387,7 @@ public:
         relativePose.trackpad_y = current.trackpad_y;
         relativePose.trigger = current.trigger;
         relativePose.time = current.time;
-        
+
         return relativePose;
     }
 

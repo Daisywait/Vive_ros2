@@ -182,6 +182,47 @@ inline Eigen::Vector3d rotateVector(const Eigen::Vector3d& vector,
     return quaternion * vector;
 }
 
+/**
+ * @brief Corrects VR space rotation error (90° rotation around Y-axis)
+ * @param vrPosition Original position from OpenVR
+ * @return Corrected position matching physical space
+ *
+ * Based on actual test data analysis:
+ * - Physical left/right movement → VR's Z-axis changes (should be X-axis)
+ * - Physical forward/backward → Mixed Y/Z changes (should be Z-axis)
+ * - Physical up/down → Correct (Y-axis) ✓
+ *
+ * The VR playspace is rotated ~90° clockwise around the Y-axis.
+ * This function applies a counter-clockwise 90° rotation to correct it.
+ *
+ * Transformation matrix (rotate 90° CCW around Y-axis):
+ * [ 0  0  1 ]   [ VR.x ]   [ VR.z  ]
+ * [ 0  1  0 ] × [ VR.y ] = [ VR.y  ]
+ * [-1  0  0 ]   [ VR.z ]   [ -VR.x ]
+ */
+inline Eigen::Vector3d correctVRSpaceRotation(const Eigen::Vector3d& vrPosition) {
+    Eigen::Vector3d corrected;
+    corrected.x() = -vrPosition.z();  // Physical X (left/right) ← VR -Z (fixed sign)
+    corrected.y() = vrPosition.y();   // Physical Y (up/down) ← VR Y (unchanged)
+    corrected.z() = vrPosition.x();   // Physical Z (forward/back) ← VR X (fixed sign)
+    return corrected;
+}
+
+/**
+ * @brief Corrects quaternion orientation for VR space rotation
+ * @param vrQuaternion Original quaternion from OpenVR
+ * @return Corrected quaternion matching physical space orientation
+ *
+ * Applies the same 90° rotation correction to orientation.
+ */
+inline Eigen::Quaterniond correctVROrientationRotation(const Eigen::Quaterniond& vrQuaternion) {
+    // Create rotation quaternion: 90° counter-clockwise around Y-axis
+    Eigen::Quaterniond correction(Eigen::AngleAxisd(-M_PI / 2.0, Eigen::Vector3d::UnitY()));
+
+    // Apply correction: corrected = correction * original
+    return correction * vrQuaternion;
+}
+
 } // namespace VRTransforms
 
 #endif // EIGEN_TRANSFORMS_HPP

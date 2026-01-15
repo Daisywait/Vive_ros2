@@ -7,6 +7,25 @@
 #include "json.hpp" // Include nlohmann/json
 #include "server.hpp"
 
+// Disable debug log file output - keep console output only
+#undef logMessage
+#define logMessage(level, message) do { \
+    if (level != Debug) { \
+        std::string levelStr; \
+        switch (level) { \
+            case Info:    levelStr = "INFO";    break; \
+            case Warning: levelStr = "WARNING"; break; \
+            case Error:   levelStr = "ERROR";   break; \
+            default:      levelStr = "UNKNOWN"; break; \
+        } \
+        if (level == Warning || level == Error) { \
+            std::cerr << "[" << levelStr << "] " << message << std::endl; \
+        } else { \
+            std::cout << "[" << levelStr << "] " << message << std::endl; \
+        } \
+    } \
+} while(0)
+
 // VR Input Configuration Constants
 namespace VRInputConfig {
     constexpr double DEFAULT_PUBLISH_FREQUENCY = 50.0;
@@ -111,25 +130,25 @@ void ViveInput::runVR() {
     // For trigger feedback
     static int previousStep[VRInputConfig::MAX_CONTROLLERS] = {-1, -1}; // Initialize previous step for both controllers
 
-    // Debug 4: 循环频率监控
-    static auto loopStartTime = std::chrono::steady_clock::now();
-    static int loopCount = 0;
-    static int dataReceivedCount[VRInputConfig::MAX_CONTROLLERS] = {0, 0};
+    // Debug disabled - frequency monitoring commented out
+    // static auto loopStartTime = std::chrono::steady_clock::now();
+    // static int loopCount = 0;
+    // static int dataReceivedCount[VRInputConfig::MAX_CONTROLLERS] = {0, 0};
 
     while (true) {
-        // 每秒输出一次循环频率统计
-        loopCount++;
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - loopStartTime).count();
-        if (elapsed >= 1) {
-            double loopHz = static_cast<double>(loopCount) / elapsed;
-            logMessage(Info, "=== 频率统计 === 主循环: " + std::to_string(loopHz) +
-                      " Hz, 右手柄数据: " + std::to_string(dataReceivedCount[0]) + " 次/秒");
-            loopCount = 0;
-            dataReceivedCount[0] = 0;
-            dataReceivedCount[1] = 0;
-            loopStartTime = now;
-        }
+        // Debug disabled - frequency statistics commented out
+        // loopCount++;
+        // auto now = std::chrono::steady_clock::now();
+        // auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - loopStartTime).count();
+        // if (elapsed >= 1) {
+        //     double loopHz = static_cast<double>(loopCount) / elapsed;
+        //     logMessage(Info, "=== 频率统计 === 主循环: " + std::to_string(loopHz) +
+        //               " Hz, 右手柄数据: " + std::to_string(dataReceivedCount[0]) + " 次/秒");
+        //     loopCount = 0;
+        //     dataReceivedCount[0] = 0;
+        //     dataReceivedCount[1] = 0;
+        //     loopStartTime = now;
+        // }
 
         // Reset controller detection status for this loop
         controller_detected[0] = false; // Right controller
@@ -144,34 +163,27 @@ void ViveInput::runVR() {
 
         // First, scan for all controllers
         for (uint32_t i = 0; i < vr::k_unMaxTrackedDeviceCount; i++) {
-            // Debug 1: 只打印控制器设备的详细信息
-            if (trackedDevicePose[i].bDeviceIsConnected) {
-                vr::ETrackedDeviceClass deviceClass = pHMD->GetTrackedDeviceClass(i);
-
-                // 只对控制器输出详细信息
-                if (deviceClass == vr::TrackedDeviceClass_Controller) {
-                    std::string modelNumber = VRUtils::getTrackedDeviceString(pHMD, i, vr::Prop_ModelNumber_String);
-                    std::string serialNumber = VRUtils::getTrackedDeviceString(pHMD, i, vr::Prop_SerialNumber_String);
-
-                    // 追踪状态字符串
-                    std::string trackingStatus;
-                    switch (trackedDevicePose[i].eTrackingResult) {
-                        case vr::TrackingResult_Running_OK: trackingStatus = "OK"; break;
-                        case vr::TrackingResult_Running_OutOfRange: trackingStatus = "OutOfRange"; break;
-                        case vr::TrackingResult_Calibrating_InProgress: trackingStatus = "Calibrating"; break;
-                        default: trackingStatus = "Other(" + std::to_string(trackedDevicePose[i].eTrackingResult) + ")"; break;
-                    }
-
-                    // 获取控制器角色
-                    vr::ETrackedControllerRole role = pHMD->GetControllerRoleForTrackedDeviceIndex(i);
-                    std::string roleStr = (role == vr::TrackedControllerRole_RightHand) ? "右手" :
-                                         (role == vr::TrackedControllerRole_LeftHand) ? "左手" : "未知";
-
-                    logMessage(Debug, "[控制器 " + std::to_string(i) + "] 型号: " + modelNumber +
-                              ", 角色: " + roleStr + ", 追踪: " + trackingStatus +
-                              ", Pose有效: " + (trackedDevicePose[i].bPoseIsValid ? "是" : "否"));
-                }
-            }
+            // Debug disabled - controller device info logging commented out
+            // if (trackedDevicePose[i].bDeviceIsConnected) {
+            //     vr::ETrackedDeviceClass deviceClass = pHMD->GetTrackedDeviceClass(i);
+            //     if (deviceClass == vr::TrackedDeviceClass_Controller) {
+            //         std::string modelNumber = VRUtils::getTrackedDeviceString(pHMD, i, vr::Prop_ModelNumber_String);
+            //         std::string serialNumber = VRUtils::getTrackedDeviceString(pHMD, i, vr::Prop_SerialNumber_String);
+            //         std::string trackingStatus;
+            //         switch (trackedDevicePose[i].eTrackingResult) {
+            //             case vr::TrackingResult_Running_OK: trackingStatus = "OK"; break;
+            //             case vr::TrackingResult_Running_OutOfRange: trackingStatus = "OutOfRange"; break;
+            //             case vr::TrackingResult_Calibrating_InProgress: trackingStatus = "Calibrating"; break;
+            //             default: trackingStatus = "Other(" + std::to_string(trackedDevicePose[i].eTrackingResult) + ")"; break;
+            //         }
+            //         vr::ETrackedControllerRole role = pHMD->GetControllerRoleForTrackedDeviceIndex(i);
+            //         std::string roleStr = (role == vr::TrackedControllerRole_RightHand) ? "右手" :
+            //                              (role == vr::TrackedControllerRole_LeftHand) ? "左手" : "未知";
+            //         logMessage(Debug, "[控制器 " + std::to_string(i) + "] 型号: " + modelNumber +
+            //                   ", 角色: " + roleStr + ", 追踪: " + trackingStatus +
+            //                   ", Pose有效: " + (trackedDevicePose[i].bPoseIsValid ? "是" : "否"));
+            //     }
+            // }
 
             if (trackedDevicePose[i].bDeviceIsConnected && trackedDevicePose[i].bPoseIsValid
                 && trackedDevicePose[i].eTrackingResult == vr::TrackingResult_Running_OK) {
@@ -195,17 +207,22 @@ void ViveInput::runVR() {
                         vr::HmdMatrix34_t steamVRMatrix = trackedDevicePose[i].mDeviceToAbsoluteTracking;
                         
                         // Use new Eigen-based transform utilities
-                        Eigen::Vector3d position = VRTransforms::getPositionFromVRMatrix(steamVRMatrix);
-                        Eigen::Quaterniond quaternion = VRTransforms::getQuaternionFromVRMatrix(steamVRMatrix);
-                        
-                        logMessage(Debug, "[CONTROLLER " + std::to_string(role_index) + "] [POSE CM]: " + 
-                                std::to_string(position.x() * 100) + " " + 
-                                std::to_string(position.y() * 100) + " " + 
-                                std::to_string(position.z() * 100));
-                        
+                        Eigen::Vector3d position_raw = VRTransforms::getPositionFromVRMatrix(steamVRMatrix);
+                        Eigen::Quaterniond quaternion_raw = VRTransforms::getQuaternionFromVRMatrix(steamVRMatrix);
+
+                        // Apply VR space rotation correction (90° rotation fix)
+                        Eigen::Vector3d position = VRTransforms::correctVRSpaceRotation(position_raw);
+                        Eigen::Quaterniond quaternion = VRTransforms::correctVROrientationRotation(quaternion_raw);
+
+                        // Debug disabled - position logging commented out
+                        // logMessage(Debug, "[CONTROLLER " + std::to_string(role_index) + "] [POSE CM]: " +
+                        //         std::to_string(position.x() * 100) + " " +
+                        //         std::to_string(position.y() * 100) + " " +
+                        //         std::to_string(position.z() * 100));
+
                         // Reset local data for this controller
                         VRUtils::resetJsonData(local_data);
-                        
+
                         // Store controller data using new Eigen-based methods
                         local_data.time = Server::getCurrentTimeWithMilliseconds();
                         local_data.role = role_index; // 0 = right, 1 = left
@@ -216,53 +233,60 @@ void ViveInput::runVR() {
                         vr::VRControllerState_t controllerState;
                         pHMD->GetControllerState(i, &controllerState, sizeof(controllerState));
 
-                        // Debug 2: 只对右手柄打印原始数据 (role_index == 0)
-                        if (role_index == 0) {
-                            logMessage(Debug, "[右手柄] 按钮按下: 0x" +
-                                      ([](uint64_t v) { std::stringstream ss; ss << std::hex << v; return ss.str(); })(controllerState.ulButtonPressed) +
-                                      ", 触摸: 0x" +
-                                      ([](uint64_t v) { std::stringstream ss; ss << std::hex << v; return ss.str(); })(controllerState.ulButtonTouched));
-
-                            // 打印关键轴数据：轴0=摇杆/触摸板, 轴1=扳机
-                            logMessage(Debug, "[右手柄] 摇杆(轴0): x=" + std::to_string(controllerState.rAxis[0].x) +
-                                      ", y=" + std::to_string(controllerState.rAxis[0].y) +
-                                      " | 扳机(轴1): " + std::to_string(controllerState.rAxis[1].x));
-
-                            // Debug 3: 检查四元数是否有效
-                            double quatNorm = quaternion.norm();
-                            if (std::abs(quatNorm - 1.0) > 0.01) {
-                                logMessage(Warning, "[右手柄] 四元数未归一化! norm=" + std::to_string(quatNorm));
-                            }
-                        }
+                        // Debug disabled - button/axis raw data logging commented out
+                        // if (role_index == 0) {
+                        //     logMessage(Debug, "[右手柄] 按钮按下: 0x" +
+                        //               ([](uint64_t v) { std::stringstream ss; ss << std::hex << v; return ss.str(); })(controllerState.ulButtonPressed) +
+                        //               ", 触摸: 0x" +
+                        //               ([](uint64_t v) { std::stringstream ss; ss << std::hex << v; return ss.str(); })(controllerState.ulButtonTouched));
+                        //     logMessage(Debug, "[右手柄] 摇杆(轴0): x=" + std::to_string(controllerState.rAxis[0].x) +
+                        //               ", y=" + std::to_string(controllerState.rAxis[0].y) +
+                        //               " | 扳机(轴1): " + std::to_string(controllerState.rAxis[1].x));
+                        //     double quatNorm = quaternion.norm();
+                        //     if (std::abs(quatNorm - 1.0) > 0.01) {
+                        //         logMessage(Warning, "[右手柄] 四元数未归一化! norm=" + std::to_string(quatNorm));
+                        //     }
+                        // }
 
                         if ((1LL << vr::k_EButton_ApplicationMenu) & controllerState.ulButtonPressed) {
-                            logMessage(Debug, "Application Menu button pressed, resetting the pose");
+                            // Debug disabled - button press logging commented out
+                            // logMessage(Debug, "Application Menu button pressed, resetting the pose");
                             first_run[role_index] = true; // Reset the first run flag for this controller
                             local_data.menu_button = true;
                             VRUtils::HapticFeedback(pHMD, i, 200);
                         }
-                        
+
                         if ((1LL << vr::k_EButton_SteamVR_Trigger) & controllerState.ulButtonPressed) {
-                            logMessage(Debug, "Trigger button pressed");
+                            // Debug disabled
+                            // logMessage(Debug, "Trigger button pressed");
                             local_data.trigger_button = true;
                         }
-                        
+
                         if ((1LL << vr::k_EButton_SteamVR_Touchpad) & controllerState.ulButtonPressed) {
-                            logMessage(Debug, "Touchpad button pressed");
+                            // Debug disabled
+                            // logMessage(Debug, "Thumbstick button pressed (click)");
                             local_data.trackpad_button = true;
                             VRUtils::HapticFeedback(pHMD, i, 200);
                         }
-                        
+
                         if ((1LL << vr::k_EButton_Grip) & controllerState.ulButtonPressed) {
-                            logMessage(Debug, "Grip button pressed");
+                            // Debug disabled
+                            // logMessage(Debug, "Grip button pressed");
                             local_data.grip_button = true;
                         }
-                        
-                        if ((1LL << vr::k_EButton_SteamVR_Touchpad) & controllerState.ulButtonTouched) {
-                            logMessage(Debug, "Touchpad button touched");
-                            local_data.trackpad_x = controllerState.rAxis[0].x;
-                            local_data.trackpad_y = controllerState.rAxis[0].y;
+
+                        // Always read thumbstick/joystick data (axis 0) - Focus Vision has thumbstick, not touchpad
+                        local_data.trackpad_x = controllerState.rAxis[0].x;
+                        local_data.trackpad_y = controllerState.rAxis[0].y;
+
+                        // Set trackpad_touch flag if thumbstick is moved away from center
+                        const float thumbstick_deadzone = 0.01f;
+                        if (std::abs(controllerState.rAxis[0].x) > thumbstick_deadzone ||
+                            std::abs(controllerState.rAxis[0].y) > thumbstick_deadzone) {
                             local_data.trackpad_touch = true;
+                            // Debug disabled
+                            // logMessage(Debug, "Thumbstick moved: x=" + std::to_string(controllerState.rAxis[0].x) +
+                            //           ", y=" + std::to_string(controllerState.rAxis[0].y));
                         }
                         
                         // Process trigger
@@ -270,7 +294,8 @@ void ViveInput::runVR() {
                         const float stepSize = 1.0f / numSteps;
                         float triggerValue = controllerState.rAxis[1].x;
                         int currentStep = static_cast<int>(triggerValue / stepSize);
-                        logMessage(Debug, "Trigger: " + std::to_string(triggerValue) + "\n");
+                        // Debug disabled
+                        // logMessage(Debug, "Trigger: " + std::to_string(triggerValue) + "\n");
                         local_data.trigger = triggerValue;
                         
                         if (currentStep != previousStep[role_index]) {
@@ -290,21 +315,24 @@ void ViveInput::runVR() {
                             double delta_distance = position_change.norm();
                             double velocity = delta_distance / delta_time;
 
-                            logMessage(Debug, "[CONTROLLER " + std::to_string(role_index) + "] Velocity: " + 
-                                      std::to_string(velocity) + " units/s");
-                            logMessage(Debug, "[CONTROLLER " + std::to_string(role_index) + "] Delta pos: " + 
-                                      std::to_string(delta_distance) + " units");
-                            
-                            // Check if delta distance is reasonable using Eigen-based validation
-                            if (!VRTransforms::isPositionChangeReasonable(position, prev_position[role_index], 0.05)) {
-                                logMessage(Warning, "[CONTROLLER " + std::to_string(role_index) + 
-                                          "] Unreasonable delta_distance detected: " + 
-                                          std::to_string(delta_distance) + " units. Skipping this data.");
-                                VRUtils::HapticFeedback(pHMD, i, VRInputConfig::WARNING_HAPTIC_DURATION);
-                                continue; // Skip this data
-                            } else {
-                                logMessage(Debug, "[CONTROLLER " + std::to_string(role_index) + "] Will publish this data");
-                            }
+                            // Debug disabled
+                            // logMessage(Debug, "[CONTROLLER " + std::to_string(role_index) + "] Velocity: " +
+                            //           std::to_string(velocity) + " units/s");
+                            // logMessage(Debug, "[CONTROLLER " + std::to_string(role_index) + "] Delta pos: " +
+                            //           std::to_string(delta_distance) + " units");
+
+                            // Position change validation DISABLED for teleoperation
+                            // This allows large movements when walking with the controller
+                            // Original check filtered out movements > 50mm between frames
+                            // if (!VRTransforms::isPositionChangeReasonable(position, prev_position[role_index], 0.05)) {
+                            //     logMessage(Warning, "[CONTROLLER " + std::to_string(role_index) +
+                            //               "] Unreasonable delta_distance detected: " +
+                            //               std::to_string(delta_distance) + " units. Skipping this data.");
+                            //     VRUtils::HapticFeedback(pHMD, i, VRInputConfig::WARNING_HAPTIC_DURATION);
+                            //     prev_position[role_index] = position;
+                            //     prev_time[role_index] = current_time;
+                            //     continue; // Skip this data
+                            // }
                         } else {
                             first_run[role_index] = false; // Set the flag to false after the first run
                         }
@@ -318,11 +346,13 @@ void ViveInput::runVR() {
                         if (role_index == 0) { // Right controller
                             right_controller_data = local_data;
                             right_controller_updated = true;
-                            dataReceivedCount[0]++;  // Debug: 增加右手柄计数
+                            // Debug disabled - frequency counter commented out
+                            // dataReceivedCount[0]++;  // Debug: 增加右手柄计数
                         } else { // Left controller
                             left_controller_data = local_data;
                             left_controller_updated = true;
-                            dataReceivedCount[1]++;  // Debug: 增加左手柄计数
+                            // Debug disabled - frequency counter commented out
+                            // dataReceivedCount[1]++;  // Debug: 增加左手柄计数
                         }
                     }
                 }
@@ -368,12 +398,12 @@ void ViveInput::runVR() {
                     
                     // Update last publish time for this controller
                     last_publish_time[role] = currentTime;
-                    
-                    // Log publishing activity
-                    std::string controller_name = (role == 0) ? "RIGHT" : "LEFT";
-                    logMessage(Debug, "[" + controller_name + "] Data sent to server at " + 
-                              std::to_string(controllerPublishFrequency) + " Hz");
-                    
+
+                    // Debug disabled
+                    // std::string controller_name = (role == 0) ? "RIGHT" : "LEFT";
+                    // logMessage(Debug, "[" + controller_name + "] Data sent to server at " +
+                    //           std::to_string(controllerPublishFrequency) + " Hz");
+
                     // Small delay to prevent mutex contention between controllers
                     std::this_thread::sleep_for(std::chrono::milliseconds(VRInputConfig::CONTROLLER_DELAY_MS));
                 }
@@ -402,15 +432,15 @@ void ViveInput::runVR() {
             // but publishing is controlled by controllerPublishFrequency
             std::this_thread::sleep_for(std::chrono::milliseconds(VRInputConfig::DATA_COLLECTION_SLEEP_MS)); // ~200Hz data collection
             lastLogTime = currentTime;
-            
-            // Log which controllers were detected
-            if (controller_detected[VRInputConfig::RIGHT_CONTROLLER_INDEX] && controller_detected[VRInputConfig::LEFT_CONTROLLER_INDEX]) {
-                logMessage(Debug, "Both controllers detected");
-            } else if (controller_detected[VRInputConfig::RIGHT_CONTROLLER_INDEX]) {
-                logMessage(Debug, "Right controller detected");
-            } else if (controller_detected[VRInputConfig::LEFT_CONTROLLER_INDEX]) {
-                logMessage(Debug, "Left controller detected");
-            }
+
+            // Debug disabled - controller detection logging commented out
+            // if (controller_detected[VRInputConfig::RIGHT_CONTROLLER_INDEX] && controller_detected[VRInputConfig::LEFT_CONTROLLER_INDEX]) {
+            //     logMessage(Debug, "Both controllers detected");
+            // } else if (controller_detected[VRInputConfig::RIGHT_CONTROLLER_INDEX]) {
+            //     logMessage(Debug, "Right controller detected");
+            // } else if (controller_detected[VRInputConfig::LEFT_CONTROLLER_INDEX]) {
+            //     logMessage(Debug, "Left controller detected");
+            // }
         }
     }
 }
@@ -446,27 +476,31 @@ void ViveInput::processControllerButtons(uint32_t deviceIndex, vr::VRControllerS
         local_data.menu_button = true;
         VRUtils::HapticFeedback(pHMD, deviceIndex, VRInputConfig::HAPTIC_FEEDBACK_DURATION);
     }
-    
+
     if ((1LL << vr::k_EButton_SteamVR_Trigger) & controllerState.ulButtonPressed) {
         logMessage(Debug, "Trigger button pressed");
         local_data.trigger_button = true;
     }
-    
+
     if ((1LL << vr::k_EButton_SteamVR_Touchpad) & controllerState.ulButtonPressed) {
-        logMessage(Debug, "Touchpad button pressed");
+        logMessage(Debug, "Thumbstick button pressed (click)");
         local_data.trackpad_button = true;
         VRUtils::HapticFeedback(pHMD, deviceIndex, VRInputConfig::HAPTIC_FEEDBACK_DURATION);
     }
-    
+
     if ((1LL << vr::k_EButton_Grip) & controllerState.ulButtonPressed) {
         logMessage(Debug, "Grip button pressed");
         local_data.grip_button = true;
     }
-    
-    if ((1LL << vr::k_EButton_SteamVR_Touchpad) & controllerState.ulButtonTouched) {
-        logMessage(Debug, "Touchpad button touched");
-        local_data.trackpad_x = controllerState.rAxis[0].x;
-        local_data.trackpad_y = controllerState.rAxis[0].y;
+
+    // Always read thumbstick/joystick data (axis 0) - Focus Vision has thumbstick, not touchpad
+    local_data.trackpad_x = controllerState.rAxis[0].x;
+    local_data.trackpad_y = controllerState.rAxis[0].y;
+
+    // Set trackpad_touch flag if thumbstick is moved away from center
+    const float thumbstick_deadzone = 0.01f;
+    if (std::abs(controllerState.rAxis[0].x) > thumbstick_deadzone ||
+        std::abs(controllerState.rAxis[0].y) > thumbstick_deadzone) {
         local_data.trackpad_touch = true;
     }
 }

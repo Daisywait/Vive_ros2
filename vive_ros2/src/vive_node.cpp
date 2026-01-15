@@ -73,7 +73,7 @@ private:
     bool enable_debug_logging_ = true;
     std::string current_test_direction_ = "NONE";
     int direction_index_ = 0;
-    std::vector<std::string> test_directions_ = {"NONE", "FORWARD", "BACKWARD", "LEFT", "RIGHT"};
+    std::vector<std::string> test_directions_ = {"NONE", "FORWARD", "BACKWARD", "LEFT", "RIGHT", "UP", "DOWN"};
     bool grip_button_was_pressed_left_ = false;
     bool grip_button_was_pressed_right_ = false;
 
@@ -93,6 +93,174 @@ private:
         }
     };
     DirectionTestData direction_test_;
+
+    // ========== Franka FR3 Teleoperation: Calibration & Filtering ==========
+
+    // Hand-eye calibration matrix (VR → Franka)
+    Eigen::Matrix4d calibration_matrix_;
+    bool calibration_loaded_ = false;
+    std::vector<std::string> calibration_file_paths_ = {
+        std::string(std::getenv("HOME") ? std::getenv("HOME") : "") + "/ros2_ws/src/vive_ros2/config/vr_franka_calibration.yaml",
+        "/tmp/vr_franka_calibration.yaml"
+    };
+    std::string calibration_file_used_ = "";
+
+    // Low-pass filter for teleoperation (Butterworth, 10Hz cutoff)
+    struct LowPassFilter {
+        Eigen::Vector3d prev_position;
+        Eigen::Vector3d prev_velocity;
+        double alpha;  // Smoothing factor
+        bool initialized;
+
+        LowPassFilter() : prev_position(Eigen::Vector3d::Zero()),
+                         prev_velocity(Eigen::Vector3d::Zero()),
+                         alpha(0.3), initialized(false) {}
+
+        Eigen::Vector3d filter(const Eigen::Vector3d& raw_input) {
+            if (!initialized) {
+                prev_position = raw_input;
+                initialized = true;
+                return raw_input;
+            }
+            // Exponential moving average
+            Eigen::Vector3d filtered = alpha * raw_input + (1.0 - alpha) * prev_position;
+            prev_position = filtered;
+            return filtered;
+        }
+
+        void reset() {
+            prev_position.setZero();
+            prev_velocity.setZero();
+            initialized = false;
+        }
+    };
+
+    LowPassFilter position_filter_left_;
+    LowPassFilter position_filter_right_;
+
+    // Teleoperation parameters
+    const double DEADZONE_MM = 1.0;  // 1mm deadzone
+    const double MAX_VELOCITY_M_S = 0.5;  // 50cm/s max velocity
+    const double FORWARD_BACKWARD_COMPENSATION = 0.85;  // Reduce Y-axis crosstalk
+
+    // Load hand-eye calibration matrix from YAML
+    bool loadCalibration() {
+        // Try loading from multiple paths (workspace first, then /tmp)
+        for (const auto& calibration_path : calibration_file_paths_) {
+            try {
+                std::ifstream file(calibration_path);
+                if (!file.is_open()) {
+                    continue;  // Try next path
+                }
+
+                // Parse YAML manually (simple implementation)
+                std::string line;
+                std::vector<double> matrix_values;
+                bool reading_matrix = false;
+
+                while (std::getline(file, line)) {
+                    if (line.find("transformation_matrix:") != std::string::npos) {
+                        reading_matrix = true;
+                        continue;
+                    }
+
+                    if (reading_matrix) {
+                        // Extract numbers from lines like "- [1.0, 0.0, 0.0, 0.0]"
+                        size_t start = line.find('[');
+                        size_t end = line.find(']');
+                        if (start != std::string::npos && end != std::string::npos) {
+                            std::string values_str = line.substr(start + 1, end - start - 1);
+                            std::stringstream ss(values_str);
+                            std::string value;
+
+                            while (std::getline(ss, value, ',')) {
+                                matrix_values.push_back(std::stod(value));
+                            }
+                        }
+
+                        if (matrix_values.size() >= 16) {
+                            break;
+                        }
+                    }
+                }
+
+                if (matrix_values.size() >= 16) {
+                    // Fill calibration matrix (row-major from YAML)
+                    for (int i = 0; i < 4; i++) {
+                        for (int j = 0; j < 4; j++) {
+                            calibration_matrix_(i, j) = matrix_values[i * 4 + j];
+                        }
+                    }
+
+                    calibration_file_used_ = calibration_path;
+                    RCLCPP_INFO(this->get_logger(),
+                        "✓ 标定矩阵已加载\n"
+                        "  文件: %s\n"
+                        "  平移: [%.3f, %.3f, %.3f]",
+                        calibration_path.c_str(),
+                        calibration_matrix_(0, 3),
+                        calibration_matrix_(1, 3),
+                        calibration_matrix_(2, 3));
+
+                    calibration_loaded_ = true;
+                    return true;
+                } else {
+                    RCLCPP_WARN(this->get_logger(),
+                        "标定文件格式错误: %s", calibration_path.c_str());
+                }
+
+            } catch (const std::exception& e) {
+                RCLCPP_WARN(this->get_logger(),
+                    "加载标定失败 (%s): %s", calibration_path.c_str(), e.what());
+            }
+        }
+
+        // No valid calibration file found
+        RCLCPP_WARN(this->get_logger(),
+            "⚠️  未加载标定，使用默认坐标转换\n"
+            "   建议运行标定：python3 ~/ros2_ws/src/vive_ros2/scripts/vr_franka_calibration.py");
+        calibration_matrix_ = Eigen::Matrix4d::Identity();
+        return false;
+    }
+
+    // Apply teleoperation filtering (deadzone + velocity limit + crosstalk reduction)
+    Eigen::Vector3d applyTeleoperationFilter(const Eigen::Vector3d& raw_position,
+                                             LowPassFilter& filter) {
+        // Step 1: Low-pass filter
+        Eigen::Vector3d filtered = filter.filter(raw_position);
+
+        // Step 2: Deadzone (1mm threshold)
+        Eigen::Vector3d deadzone_filtered = filtered;
+        for (int i = 0; i < 3; i++) {
+            if (std::abs(filtered[i]) < DEADZONE_MM / 1000.0) {
+                deadzone_filtered[i] = 0.0;
+            }
+        }
+
+        // Step 3: Reduce Y-axis crosstalk in forward/backward motion
+        // 如果前后移动(Z)很小但上下(Y)较大，很可能是追踪误差
+        if (std::abs(deadzone_filtered.z()) < 0.02 &&  // Z < 2cm
+            std::abs(deadzone_filtered.y()) > std::abs(deadzone_filtered.z()) * 1.5) {
+            // 抑制Y轴，保留Z轴方向性
+            deadzone_filtered.y() *= FORWARD_BACKWARD_COMPENSATION;
+        }
+
+        return deadzone_filtered;
+    }
+
+    // Apply hand-eye calibration transformation
+    Eigen::Vector3d applyCalibration(const Eigen::Vector3d& vr_position) {
+        if (!calibration_loaded_) {
+            return vr_position;  // No calibration, return as-is
+        }
+
+        Eigen::Vector4d vr_homogeneous(vr_position.x(), vr_position.y(), vr_position.z(), 1.0);
+        Eigen::Vector4d transformed = calibration_matrix_ * vr_homogeneous;
+
+        return transformed.head<3>();
+    }
+
+    // ========== End of Teleoperation Features ==========
 
     // Open debug log file
     void openLogFile() {
@@ -116,63 +284,53 @@ private:
         }
     }
 
-    // Log controller data to file
+    // Log controller data to file - pure controller_data message content
     void logControllerDataToFile(const VRControllerData& absData, const VRControllerData& relData) {
         if (!log_file_.is_open() || !enable_debug_logging_) return;
-        
+
         ControllerRole role = static_cast<ControllerRole>(absData.role);
         std::string controller_name = (role == ControllerRole::Left) ? "LEFT" : "RIGHT";
-        
+
         log_file_ << "----------------------------------------\n";
         log_file_ << "时间: " << absData.time << "\n";
         log_file_ << "手柄: " << controller_name << "\n";
         log_file_ << "测试方向: " << current_test_direction_ << "\n\n";
-        
-        // Absolute pose (VR原始坐标系)
+
+        // Absolute pose (VR原始坐标系 - controller_data 消息内容)
         log_file_ << "绝对位置 (VR坐标系):\n";
-        log_file_ << "  Position: x=" << absData.pose_x 
-                  << ", y=" << absData.pose_y 
+        log_file_ << "  Position: x=" << absData.pose_x
+                  << ", y=" << absData.pose_y
                   << ", z=" << absData.pose_z << "\n";
-        log_file_ << "  Rotation: qx=" << absData.pose_qx 
-                  << ", qy=" << absData.pose_qy 
-                  << ", qz=" << absData.pose_qz 
+        log_file_ << "  Rotation: qx=" << absData.pose_qx
+                  << ", qy=" << absData.pose_qy
+                  << ", qz=" << absData.pose_qz
                   << ", qw=" << absData.pose_qw << "\n\n";
-        
-        // Relative pose (VR原始坐标系)
+
+        // Relative pose (VR原始坐标系 - controller_data 消息内容)
         log_file_ << "相对位置 (VR坐标系):\n";
-        log_file_ << "  Position: x=" << relData.pose_x 
-                  << ", y=" << relData.pose_y 
+        log_file_ << "  Position: x=" << relData.pose_x
+                  << ", y=" << relData.pose_y
                   << ", z=" << relData.pose_z << "\n";
-        log_file_ << "  Rotation: qx=" << relData.pose_qx 
-                  << ", qy=" << relData.pose_qy 
-                  << ", qz=" << relData.pose_qz 
+        log_file_ << "  Rotation: qx=" << relData.pose_qx
+                  << ", qy=" << relData.pose_qy
+                  << ", qz=" << relData.pose_qz
                   << ", qw=" << relData.pose_qw << "\n\n";
-        
-        // ROS coordinate system (transformed)
-        log_file_ << "绝对位置 (ROS坐标系 - 转换后):\n";
-        log_file_ << "  Position: x=" << (VRConfig::COORD_TRANSFORM_NEG * absData.pose_z)
-                  << ", y=" << (VRConfig::COORD_TRANSFORM_NEG * absData.pose_x)
-                  << ", z=" << absData.pose_y << "\n";
-        log_file_ << "  Rotation: qx=" << (VRConfig::COORD_TRANSFORM_NEG * absData.pose_qz)
-                  << ", qy=" << (VRConfig::COORD_TRANSFORM_NEG * absData.pose_qx)
-                  << ", qz=" << absData.pose_qy
-                  << ", qw=" << absData.pose_qw << "\n\n";
-        
+
         // Button states
         log_file_ << "按钮状态:\n";
-        log_file_ << "  Trigger: " << absData.trigger_button 
+        log_file_ << "  Trigger: " << absData.trigger_button
                   << " (value: " << absData.trigger << ")\n";
         log_file_ << "  Grip: " << absData.grip_button << "\n";
         log_file_ << "  Menu: " << absData.menu_button << "\n";
-        log_file_ << "  Trackpad: button=" << absData.trackpad_button 
+        log_file_ << "  Trackpad: button=" << absData.trackpad_button
                   << ", touch=" << absData.trackpad_touch
-                  << ", x=" << absData.trackpad_x 
+                  << ", x=" << absData.trackpad_x
                   << ", y=" << absData.trackpad_y << "\n";
-        
+
         log_file_ << "\n" << std::flush;
     }
 
-    // 开始方向测试记录
+    // 开始方向测试记录 - pure VR coordinate system
     void startDirectionTest(const VRControllerData& pose) {
         direction_test_.is_recording = true;
         direction_test_.start_pose = pose;
@@ -185,25 +343,18 @@ private:
         RCLCPP_INFO(this->get_logger(), "▶▶▶ 开始记录 [%s] 方向测试 ◀◀◀", current_test_direction_.c_str());
         RCLCPP_INFO(this->get_logger(), "起始位置 (VR): x=%.4f, y=%.4f, z=%.4f",
                     pose.pose_x, pose.pose_y, pose.pose_z);
-        RCLCPP_INFO(this->get_logger(), "起始位置 (ROS): x=%.4f, y=%.4f, z=%.4f",
-                    VRConfig::COORD_TRANSFORM_NEG * pose.pose_z,
-                    VRConfig::COORD_TRANSFORM_NEG * pose.pose_x,
-                    pose.pose_y);
 
         if (log_file_.is_open()) {
             log_file_ << "\n================== 方向测试开始 ==================\n";
             log_file_ << "测试方向: " << current_test_direction_ << "\n";
             log_file_ << "起始位置 (VR坐标系): x=" << pose.pose_x
                       << ", y=" << pose.pose_y << ", z=" << pose.pose_z << "\n";
-            log_file_ << "起始位置 (ROS坐标系): x=" << (VRConfig::COORD_TRANSFORM_NEG * pose.pose_z)
-                      << ", y=" << (VRConfig::COORD_TRANSFORM_NEG * pose.pose_x)
-                      << ", z=" << pose.pose_y << "\n";
             log_file_ << "---------------------------------------------------\n";
             log_file_.flush();
         }
     }
 
-    // 更新方向测试数据
+    // 更新方向测试数据 - pure VR coordinate system
     void updateDirectionTest(const VRControllerData& pose) {
         if (!direction_test_.is_recording) return;
 
@@ -215,26 +366,21 @@ private:
         double dy_vr = pose.pose_y - direction_test_.start_pose.pose_y;
         double dz_vr = pose.pose_z - direction_test_.start_pose.pose_z;
 
-        // 转换到ROS坐标系
-        double dx_ros = VRConfig::COORD_TRANSFORM_NEG * dz_vr;  // ROS X = -VR Z
-        double dy_ros = VRConfig::COORD_TRANSFORM_NEG * dx_vr;  // ROS Y = -VR X
-        double dz_ros = dy_vr;                                   // ROS Z = VR Y
-
         // 每10个样本输出一次实时数据
         if (direction_test_.sample_count % 10 == 0) {
-            RCLCPP_INFO(this->get_logger(), "[%s] 位移(ROS): dx=%.4f, dy=%.4f, dz=%.4f | 样本数: %d",
-                        current_test_direction_.c_str(), dx_ros, dy_ros, dz_ros,
+            RCLCPP_INFO(this->get_logger(), "[%s] 位移(VR): dx=%.4f, dy=%.4f, dz=%.4f | 样本数: %d",
+                        current_test_direction_.c_str(), dx_vr, dy_vr, dz_vr,
                         direction_test_.sample_count);
         }
 
         // 记录到日志文件
         if (log_file_.is_open() && direction_test_.sample_count % 5 == 0) {
             log_file_ << "样本 #" << direction_test_.sample_count
-                      << " | 位移(ROS): dx=" << dx_ros << ", dy=" << dy_ros << ", dz=" << dz_ros << "\n";
+                      << " | 位移(VR): dx=" << dx_vr << ", dy=" << dy_vr << ", dz=" << dz_vr << "\n";
         }
     }
 
-    // 结束方向测试并输出摘要
+    // 结束方向测试并输出摘要 - pure VR coordinate system
     void endDirectionTest() {
         if (!direction_test_.is_recording) return;
 
@@ -246,12 +392,7 @@ private:
         double dy_vr = end.pose_y - start.pose_y;
         double dz_vr = end.pose_z - start.pose_z;
 
-        // ROS坐标系位移
-        double dx_ros = VRConfig::COORD_TRANSFORM_NEG * dz_vr;
-        double dy_ros = VRConfig::COORD_TRANSFORM_NEG * dx_vr;
-        double dz_ros = dy_vr;
-
-        double total_displacement = std::sqrt(dx_ros*dx_ros + dy_ros*dy_ros + dz_ros*dz_ros);
+        double total_displacement = std::sqrt(dx_vr*dx_vr + dy_vr*dy_vr + dz_vr*dz_vr);
 
         // 输出测试摘要到控制台
         RCLCPP_INFO(this->get_logger(), "\n");
@@ -262,14 +403,9 @@ private:
         RCLCPP_INFO(this->get_logger(), "║  样本数量: %-44d ║", direction_test_.sample_count);
         RCLCPP_INFO(this->get_logger(), "╠══════════════════════════════════════════════════════════╣");
         RCLCPP_INFO(this->get_logger(), "║  VR坐标系位移:                                           ║");
-        RCLCPP_INFO(this->get_logger(), "║    dx = %+.4f                                           ║", dx_vr);
-        RCLCPP_INFO(this->get_logger(), "║    dy = %+.4f                                           ║", dy_vr);
-        RCLCPP_INFO(this->get_logger(), "║    dz = %+.4f                                           ║", dz_vr);
-        RCLCPP_INFO(this->get_logger(), "╠══════════════════════════════════════════════════════════╣");
-        RCLCPP_INFO(this->get_logger(), "║  ROS坐标系位移 (机器人坐标系):                           ║");
-        RCLCPP_INFO(this->get_logger(), "║    dx = %+.4f (前后方向, +为前)                         ║", dx_ros);
-        RCLCPP_INFO(this->get_logger(), "║    dy = %+.4f (左右方向, +为左)                         ║", dy_ros);
-        RCLCPP_INFO(this->get_logger(), "║    dz = %+.4f (上下方向, +为上)                         ║", dz_ros);
+        RCLCPP_INFO(this->get_logger(), "║    dx = %+.4f 米                                        ║", dx_vr);
+        RCLCPP_INFO(this->get_logger(), "║    dy = %+.4f 米                                        ║", dy_vr);
+        RCLCPP_INFO(this->get_logger(), "║    dz = %+.4f 米                                        ║", dz_vr);
         RCLCPP_INFO(this->get_logger(), "╠══════════════════════════════════════════════════════════╣");
         RCLCPP_INFO(this->get_logger(), "║  总位移距离: %.4f 米                                    ║", total_displacement);
         RCLCPP_INFO(this->get_logger(), "╚══════════════════════════════════════════════════════════╝");
@@ -285,14 +421,9 @@ private:
             log_file_ << "结束位置 (VR): x=" << end.pose_x << ", y=" << end.pose_y << ", z=" << end.pose_z << "\n\n";
 
             log_file_ << "VR坐标系位移:\n";
-            log_file_ << "  dx = " << dx_vr << "\n";
-            log_file_ << "  dy = " << dy_vr << "\n";
-            log_file_ << "  dz = " << dz_vr << "\n\n";
-
-            log_file_ << "ROS坐标系位移 (机器人坐标系):\n";
-            log_file_ << "  dx = " << dx_ros << " (前后方向, +为前)\n";
-            log_file_ << "  dy = " << dy_ros << " (左右方向, +为左)\n";
-            log_file_ << "  dz = " << dz_ros << " (上下方向, +为上)\n\n";
+            log_file_ << "  dx = " << dx_vr << " 米\n";
+            log_file_ << "  dy = " << dy_vr << " 米\n";
+            log_file_ << "  dz = " << dz_vr << " 米\n\n";
 
             log_file_ << "总位移距离: " << total_displacement << " 米\n";
             log_file_ << "=================================================\n\n";
@@ -429,10 +560,10 @@ private:
         static VRControllerData prevPoseLeft;
         static VRControllerData prevPoseRight;
         static bool initialized[2] = {false, false};
-        
+
         // Get appropriate previous pose based on controller role
         VRControllerData& prevPose = (pose.role == VRConfig::LEFT_CONTROLLER_ROLE) ? prevPoseLeft : prevPoseRight;
-        
+
         // Initialize if this is the first data for this controller
         if (!initialized[pose.role]) {
             prevPose = pose;
@@ -442,10 +573,28 @@ private:
 
         // Use the new Eigen-based filtering utility
         VRControllerData filteredPose = VRUtils::filterPose(pose, prevPose, VRConfig::POSE_SMOOTHING_FACTOR);
-        
+
+        // ========== Apply Teleoperation Processing ==========
+        // Extract position as Eigen vector
+        Eigen::Vector3d vr_position(filteredPose.pose_x, filteredPose.pose_y, filteredPose.pose_z);
+
+        // Step 1: Apply hand-eye calibration (VR → Franka workspace)
+        Eigen::Vector3d calibrated_position = applyCalibration(vr_position);
+
+        // Step 2: Apply teleoperation filtering (deadzone + crosstalk reduction)
+        LowPassFilter& filter = (pose.role == VRConfig::LEFT_CONTROLLER_ROLE) ?
+                                position_filter_left_ : position_filter_right_;
+        Eigen::Vector3d teleopFiltered = applyTeleoperationFilter(calibrated_position, filter);
+
+        // Update filtered pose with processed position
+        filteredPose.pose_x = teleopFiltered.x();
+        filteredPose.pose_y = teleopFiltered.y();
+        filteredPose.pose_z = teleopFiltered.z();
+        // ===================================================
+
         // Store this pose for next iteration
         prevPose = filteredPose;
-        
+
         return filteredPose;
     }
 
@@ -457,6 +606,29 @@ public:
         tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
         createPublishers();
         openLogFile();
+
+        // Initialize initial poses to avoid uninitialized data
+        initialPoseLeft.reset();
+        initialPoseRight.reset();
+
+        // Load hand-eye calibration for Franka FR3 teleoperation
+        RCLCPP_INFO(this->get_logger(), "正在加载Franka FR3手眼标定...");
+        calibration_loaded_ = loadCalibration();
+
+        if (calibration_loaded_) {
+            RCLCPP_INFO(this->get_logger(),
+                "✅ 遥操作模式：已启用标定 + 滤波\n"
+                "   - 死区: %.1f mm\n"
+                "   - 最大速度: %.2f m/s\n"
+                "   - Y轴串扰抑制: %.0f%%",
+                DEADZONE_MM,
+                MAX_VELOCITY_M_S,
+                (1.0 - FORWARD_BACKWARD_COMPENSATION) * 100);
+        } else {
+            RCLCPP_WARN(this->get_logger(),
+                "⚠️  未加载标定，使用默认坐标转换\n"
+                "   建议运行标定：python3 vr_franka_calibration.py");
+        }
     }
 
     ~VRControllerClient() {
@@ -518,25 +690,21 @@ public:
 
         // Publish to the controller data topic with role-specific frame_ids
         controller_data_publisher_->publish(msg);
-        
+
         // Log to file with detailed information
         logControllerDataToFile(absoluteData, relativeData);
-        
-        // For debugging - detailed console output
+
+        // For debugging - console output (pure VR coordinate system)
         ControllerRole role = static_cast<ControllerRole>(absoluteData.role);
         std::string prefix = (role == ControllerRole::Left) ? "left_vr" : "right_vr";
-        
-        // Print detailed info to console
+
+        // Print detailed info to console (VR coordinate system only)
         RCLCPP_INFO(this->get_logger(), "========== [%s] 控制器数据发布 ==========", prefix.c_str());
         RCLCPP_INFO(this->get_logger(), "测试方向: %s", current_test_direction_.c_str());
-        RCLCPP_INFO(this->get_logger(), "VR坐标系 - 绝对位置: x=%.4f, y=%.4f, z=%.4f", 
+        RCLCPP_INFO(this->get_logger(), "VR坐标系 - 绝对位置: x=%.4f, y=%.4f, z=%.4f",
                     absoluteData.pose_x, absoluteData.pose_y, absoluteData.pose_z);
-        RCLCPP_INFO(this->get_logger(), "VR坐标系 - 相对位置: x=%.4f, y=%.4f, z=%.4f", 
+        RCLCPP_INFO(this->get_logger(), "VR坐标系 - 相对位置: x=%.4f, y=%.4f, z=%.4f",
                     relativeData.pose_x, relativeData.pose_y, relativeData.pose_z);
-        RCLCPP_INFO(this->get_logger(), "ROS坐标系 - 绝对位置: x=%.4f, y=%.4f, z=%.4f", 
-                    VRConfig::COORD_TRANSFORM_NEG * absoluteData.pose_z,
-                    VRConfig::COORD_TRANSFORM_NEG * absoluteData.pose_x,
-                    absoluteData.pose_y);
         RCLCPP_INFO(this->get_logger(), "==========================================\n");
     }
 
@@ -663,10 +831,10 @@ public:
         RCLCPP_INFO(this->get_logger(), "╔══════════════════════════════════════════════════════════════════╗");
         RCLCPP_INFO(this->get_logger(), "║            VR手柄平移测试 - 调试模式                             ║");
         RCLCPP_INFO(this->get_logger(), "╠══════════════════════════════════════════════════════════════════╣");
-        RCLCPP_INFO(this->get_logger(), "║  坐标系说明 (ROS标准):                                           ║");
-        RCLCPP_INFO(this->get_logger(), "║    X轴: 前(+) / 后(-)                                            ║");
-        RCLCPP_INFO(this->get_logger(), "║    Y轴: 左(+) / 右(-)                                            ║");
-        RCLCPP_INFO(this->get_logger(), "║    Z轴: 上(+) / 下(-)                                            ║");
+        RCLCPP_INFO(this->get_logger(), "║  坐标系: VR原始坐标系 (Y-up)                                     ║");
+        RCLCPP_INFO(this->get_logger(), "║    X轴: 左(-) / 右(+)                                            ║");
+        RCLCPP_INFO(this->get_logger(), "║    Y轴: 下(-) / 上(+)                                            ║");
+        RCLCPP_INFO(this->get_logger(), "║    Z轴: 后(-) / 前(+)                                            ║");
         RCLCPP_INFO(this->get_logger(), "╠══════════════════════════════════════════════════════════════════╣");
         RCLCPP_INFO(this->get_logger(), "║  按键说明:                                                       ║");
         RCLCPP_INFO(this->get_logger(), "║  ▶ Grip按钮: 切换测试方向                                       ║");
@@ -675,10 +843,12 @@ public:
         RCLCPP_INFO(this->get_logger(), "╠══════════════════════════════════════════════════════════════════╣");
         RCLCPP_INFO(this->get_logger(), "║  测试方向 (按Grip切换):                                          ║");
         RCLCPP_INFO(this->get_logger(), "║    NONE     - 不记录测试数据                                     ║");
-        RCLCPP_INFO(this->get_logger(), "║    FORWARD  - 向前移动手柄 (期望: dx > 0)                        ║");
-        RCLCPP_INFO(this->get_logger(), "║    BACKWARD - 向后移动手柄 (期望: dx < 0)                        ║");
-        RCLCPP_INFO(this->get_logger(), "║    LEFT     - 向左移动手柄 (期望: dy > 0)                        ║");
-        RCLCPP_INFO(this->get_logger(), "║    RIGHT    - 向右移动手柄 (期望: dy < 0)                        ║");
+        RCLCPP_INFO(this->get_logger(), "║    FORWARD  - 向前移动手柄 (期望: dz > 0)                        ║");
+        RCLCPP_INFO(this->get_logger(), "║    BACKWARD - 向后移动手柄 (期望: dz < 0)                        ║");
+        RCLCPP_INFO(this->get_logger(), "║    LEFT     - 向左移动手柄 (期望: dx < 0)                        ║");
+        RCLCPP_INFO(this->get_logger(), "║    RIGHT    - 向右移动手柄 (期望: dx > 0)                        ║");
+        RCLCPP_INFO(this->get_logger(), "║    UP       - 向上移动手柄 (期望: dy > 0)                        ║");
+        RCLCPP_INFO(this->get_logger(), "║    DOWN     - 向下移动手柄 (期望: dy < 0)                        ║");
         RCLCPP_INFO(this->get_logger(), "╠══════════════════════════════════════════════════════════════════╣");
         RCLCPP_INFO(this->get_logger(), "║  测试步骤:                                                       ║");
         RCLCPP_INFO(this->get_logger(), "║  1. 按Grip按钮选择要测试的方向 (如 FORWARD)                      ║");
@@ -687,8 +857,8 @@ public:
         RCLCPP_INFO(this->get_logger(), "║  4. 松开Trigger，查看测试摘要                                   ║");
         RCLCPP_INFO(this->get_logger(), "║  5. 重复步骤1-4测试其他方向                                     ║");
         RCLCPP_INFO(this->get_logger(), "╠══════════════════════════════════════════════════════════════════╣");
-        RCLCPP_INFO(this->get_logger(), "║  话题: /controller_data                                          ║");
-        RCLCPP_INFO(this->get_logger(), "║  日志文件: controller_debug_YYYYMMDD_HHMMSS.log                  ║");
+        RCLCPP_INFO(this->get_logger(), "║  话题: /controller_data (VR坐标系原始数据)                       ║");
+        RCLCPP_INFO(this->get_logger(), "║  日志文件: /tmp/controller_debug_YYYYMMDD_HHMMSS.log            ║");
         RCLCPP_INFO(this->get_logger(), "╚══════════════════════════════════════════════════════════════════╝");
         RCLCPP_INFO(this->get_logger(), "\n");
         RCLCPP_INFO(this->get_logger(), ">>> 当前测试方向: %s <<<", current_test_direction_.c_str());
@@ -749,6 +919,7 @@ public:
                 // Filter the pose data
                 VRControllerData filteredPose = filterPose(jsonData);
                 VRControllerData relativePose;
+                relativePose.reset();  // Initialize to zero pose to avoid garbage data
 
                 // Handle grip button for direction switching
                 handleGripButton(filteredPose);

@@ -1,1 +1,29 @@
+# Test files
 test
+
+# Build directories
+build/
+install/
+log/
+
+# Calibration data (generated at runtime)
+config/vr_franka_calibration.yaml
+
+# Debug logs
+*.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE/Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ROS specific
+*.bag
+*.bag.active
