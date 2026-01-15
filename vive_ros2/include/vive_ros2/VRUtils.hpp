@@ -3,10 +3,12 @@
 
 #include <string>
 #include <iostream>
+#include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <chrono>
 #include <cmath>
+#include <mutex>
 #include <openvr.h>
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
@@ -94,32 +96,102 @@ enum LogLevel {
 };
 
 /**
+ * @brief Debug log file manager - singleton pattern for file logging
+ */
+class DebugLogFile {
+public:
+    static DebugLogFile& getInstance() {
+        static DebugLogFile instance;
+        return instance;
+    }
+
+    void write(const std::string& message) {
+        std::lock_guard<std::mutex> lock(file_mutex);
+        if (log_file.is_open()) {
+            log_file << message << std::endl;
+            log_file.flush();  // 确保立即写入
+        }
+    }
+
+    std::string getFilePath() const {
+        return log_file_path;
+    }
+
+private:
+    DebugLogFile() {
+        // 创建带时间戳的日志文件名
+        auto now = std::chrono::system_clock::now();
+        auto time_t = std::chrono::system_clock::to_time_t(now);
+
+        std::ostringstream filename;
+        filename << "/tmp/vive_debug_";
+        filename << std::put_time(std::localtime(&time_t), "%Y%m%d_%H%M%S");
+        filename << ".log";
+
+        log_file_path = filename.str();
+        log_file.open(log_file_path, std::ios::out | std::ios::app);
+
+        if (log_file.is_open()) {
+            log_file << "========================================" << std::endl;
+            log_file << "VIVE Debug Log Started: " << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S") << std::endl;
+            log_file << "========================================" << std::endl;
+            std::cout << "[LOG] Debug log file created: " << log_file_path << std::endl;
+        }
+    }
+
+    ~DebugLogFile() {
+        if (log_file.is_open()) {
+            log_file << "========================================" << std::endl;
+            log_file << "VIVE Debug Log Ended" << std::endl;
+            log_file << "========================================" << std::endl;
+            log_file.close();
+        }
+    }
+
+    // 禁止拷贝
+    DebugLogFile(const DebugLogFile&) = delete;
+    DebugLogFile& operator=(const DebugLogFile&) = delete;
+
+    std::ofstream log_file;
+    std::string log_file_path;
+    std::mutex file_mutex;
+};
+
+/**
  * @brief Thread-safe logging function with timestamps
+ * Outputs to both console and debug log file
  */
 inline void logMessage(LogLevel level, const std::string& message) {
     auto now = std::chrono::system_clock::now();
     auto time_t = std::chrono::system_clock::to_time_t(now);
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         now.time_since_epoch()) % 1000;
-    
+
     std::ostringstream oss;
     oss << std::put_time(std::localtime(&time_t), "%H:%M:%S");
     oss << '.' << std::setfill('0') << std::setw(3) << ms.count();
-    
+
+    std::string levelStr;
     switch (level) {
-        case Info:
-            std::cout << "[" << oss.str() << "][INFO] " << message << std::endl;
-            break;
-        case Debug:
-            std::cout << "[" << oss.str() << "][DEBUG] " << message << std::endl;
-            break;
-        case Warning:
-            std::cerr << "[" << oss.str() << "][WARNING] " << message << std::endl;
-            break;
-        case Error:
-            std::cerr << "[" << oss.str() << "][ERROR] " << message << std::endl;
-            break;
+        case Info:    levelStr = "INFO";    break;
+        case Debug:   levelStr = "DEBUG";   break;
+        case Warning: levelStr = "WARNING"; break;
+        case Error:   levelStr = "ERROR";   break;
     }
+
+    std::string fullMessage = "[" + oss.str() + "][" + levelStr + "] " + message;
+
+    // 输出到控制台 (只输出非 Debug 级别，减少控制台干扰)
+    if (level != Debug) {
+        if (level == Warning || level == Error) {
+            std::cerr << fullMessage << std::endl;
+        } else {
+            std::cout << fullMessage << std::endl;
+        }
+    }
+
+    // 所有日志都写入文件
+    DebugLogFile::getInstance().write(fullMessage);
 }
 
 
