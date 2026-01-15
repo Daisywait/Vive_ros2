@@ -229,11 +229,40 @@ public:
     /**
      * @brief Trigger haptic feedback on controller
      */
-    static void HapticFeedback(vr::IVRSystem* pHMD, vr::TrackedDeviceIndex_t unControllerDeviceIndex, 
+    static void HapticFeedback(vr::IVRSystem* pHMD, vr::TrackedDeviceIndex_t unControllerDeviceIndex,
                               unsigned short durationMicroSec) {
         if (pHMD) {
             pHMD->TriggerHapticPulse(unControllerDeviceIndex, 0, durationMicroSec);
         }
+    }
+
+    /**
+     * @brief Get a string property from a tracked device
+     * @param pHMD Pointer to the VR system
+     * @param unDevice Device index
+     * @param prop Property to query
+     * @return String value of the property, or empty string on error
+     */
+    static std::string getTrackedDeviceString(vr::IVRSystem* pHMD, vr::TrackedDeviceIndex_t unDevice,
+                                              vr::TrackedDeviceProperty prop) {
+        if (!pHMD) return "";
+
+        vr::TrackedPropertyError error;
+        uint32_t bufferLen = pHMD->GetStringTrackedDeviceProperty(unDevice, prop, nullptr, 0, &error);
+        if (bufferLen == 0) {
+            return "";
+        }
+
+        std::string result;
+        result.resize(bufferLen);
+        pHMD->GetStringTrackedDeviceProperty(unDevice, prop, &result[0], bufferLen, &error);
+
+        // Remove trailing null character if present
+        if (!result.empty() && result.back() == '\0') {
+            result.pop_back();
+        }
+
+        return result;
     }
 
     /**

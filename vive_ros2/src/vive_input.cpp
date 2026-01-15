@@ -107,11 +107,30 @@ void ViveInput::runVR() {
     logMessage(Info, "Starting VR loop");
     logMessage(Info, "Controller publish frequency set to: " + std::to_string(controllerPublishFrequency) + " Hz");
     auto lastLogTime = std::chrono::steady_clock::now(); // Initialize the last log time
-    
+
     // For trigger feedback
     static int previousStep[VRInputConfig::MAX_CONTROLLERS] = {-1, -1}; // Initialize previous step for both controllers
 
+    // Debug 4: 循环频率监控
+    static auto loopStartTime = std::chrono::steady_clock::now();
+    static int loopCount = 0;
+    static int dataReceivedCount[VRInputConfig::MAX_CONTROLLERS] = {0, 0};
+
     while (true) {
+        // 每秒输出一次循环频率统计
+        loopCount++;
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - loopStartTime).count();
+        if (elapsed >= 1) {
+            double loopHz = static_cast<double>(loopCount) / elapsed;
+            logMessage(Info, "=== 频率统计 === 主循环: " + std::to_string(loopHz) +
+                      " Hz, 右手柄数据: " + std::to_string(dataReceivedCount[0]) + " 次/秒");
+            loopCount = 0;
+            dataReceivedCount[0] = 0;
+            dataReceivedCount[1] = 0;
+            loopStartTime = now;
+        }
+
         // Reset controller detection status for this loop
         controller_detected[0] = false; // Right controller
         controller_detected[1] = false; // Left controller
@@ -125,6 +144,35 @@ void ViveInput::runVR() {
 
         // First, scan for all controllers
         for (uint32_t i = 0; i < vr::k_unMaxTrackedDeviceCount; i++) {
+            // Debug 1: 只打印控制器设备的详细信息
+            if (trackedDevicePose[i].bDeviceIsConnected) {
+                vr::ETrackedDeviceClass deviceClass = pHMD->GetTrackedDeviceClass(i);
+
+                // 只对控制器输出详细信息
+                if (deviceClass == vr::TrackedDeviceClass_Controller) {
+                    std::string modelNumber = VRUtils::getTrackedDeviceString(pHMD, i, vr::Prop_ModelNumber_String);
+                    std::string serialNumber = VRUtils::getTrackedDeviceString(pHMD, i, vr::Prop_SerialNumber_String);
+
+                    // 追踪状态字符串
+                    std::string trackingStatus;
+                    switch (trackedDevicePose[i].eTrackingResult) {
+                        case vr::TrackingResult_Running_OK: trackingStatus = "OK"; break;
+                        case vr::TrackingResult_Running_OutOfRange: trackingStatus = "OutOfRange"; break;
+                        case vr::TrackingResult_Calibrating_InProgress: trackingStatus = "Calibrating"; break;
+                        default: trackingStatus = "Other(" + std::to_string(trackedDevicePose[i].eTrackingResult) + ")"; break;
+                    }
+
+                    // 获取控制器角色
+                    vr::ETrackedControllerRole role = pHMD->GetControllerRoleForTrackedDeviceIndex(i);
+                    std::string roleStr = (role == vr::TrackedControllerRole_RightHand) ? "右手" :
+                                         (role == vr::TrackedControllerRole_LeftHand) ? "左手" : "未知";
+
+                    logMessage(Debug, "[控制器 " + std::to_string(i) + "] 型号: " + modelNumber +
+                              ", 角色: " + roleStr + ", 追踪: " + trackingStatus +
+                              ", Pose有效: " + (trackedDevicePose[i].bPoseIsValid ? "是" : "否"));
+                }
+            }
+
             if (trackedDevicePose[i].bDeviceIsConnected && trackedDevicePose[i].bPoseIsValid
                 && trackedDevicePose[i].eTrackingResult == vr::TrackingResult_Running_OK) {
 
@@ -167,7 +215,26 @@ void ViveInput::runVR() {
                         // Process controller state and buttons
                         vr::VRControllerState_t controllerState;
                         pHMD->GetControllerState(i, &controllerState, sizeof(controllerState));
-                        
+
+                        // Debug 2: 只对右手柄打印原始数据 (role_index == 0)
+                        if (role_index == 0) {
+                            logMessage(Debug, "[右手柄] 按钮按下: 0x" +
+                                      ([](uint64_t v) { std::stringstream ss; ss << std::hex << v; return ss.str(); })(controllerState.ulButtonPressed) +
+                                      ", 触摸: 0x" +
+                                      ([](uint64_t v) { std::stringstream ss; ss << std::hex << v; return ss.str(); })(controllerState.ulButtonTouched));
+
+                            // 打印关键轴数据：轴0=摇杆/触摸板, 轴1=扳机
+                            logMessage(Debug, "[右手柄] 摇杆(轴0): x=" + std::to_string(controllerState.rAxis[0].x) +
+                                      ", y=" + std::to_string(controllerState.rAxis[0].y) +
+                                      " | 扳机(轴1): " + std::to_string(controllerState.rAxis[1].x));
+
+                            // Debug 3: 检查四元数是否有效
+                            double quatNorm = quaternion.norm();
+                            if (std::abs(quatNorm - 1.0) > 0.01) {
+                                logMessage(Warning, "[右手柄] 四元数未归一化! norm=" + std::to_string(quatNorm));
+                            }
+                        }
+
                         if ((1LL << vr::k_EButton_ApplicationMenu) & controllerState.ulButtonPressed) {
                             logMessage(Debug, "Application Menu button pressed, resetting the pose");
                             first_run[role_index] = true; // Reset the first run flag for this controller
@@ -251,9 +318,11 @@ void ViveInput::runVR() {
                         if (role_index == 0) { // Right controller
                             right_controller_data = local_data;
                             right_controller_updated = true;
+                            dataReceivedCount[0]++;  // Debug: 增加右手柄计数
                         } else { // Left controller
                             left_controller_data = local_data;
                             left_controller_updated = true;
+                            dataReceivedCount[1]++;  // Debug: 增加左手柄计数
                         }
                     }
                 }
