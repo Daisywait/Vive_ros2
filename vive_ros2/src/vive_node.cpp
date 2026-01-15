@@ -1,5 +1,6 @@
 #include <rclcpp/rclcpp.hpp>
 #include <iostream>
+#include <fstream>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -66,6 +67,240 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::TransformStamped>::SharedPtr left_rel_transform_publisher_;
     rclcpp::Publisher<geometry_msgs::msg::TransformStamped>::SharedPtr right_abs_transform_publisher_;
     rclcpp::Publisher<geometry_msgs::msg::TransformStamped>::SharedPtr right_rel_transform_publisher_;
+
+    // Debug logging
+    std::ofstream log_file_;
+    bool enable_debug_logging_ = true;
+    std::string current_test_direction_ = "NONE";
+    int direction_index_ = 0;
+    std::vector<std::string> test_directions_ = {"NONE", "FORWARD", "BACKWARD", "LEFT", "RIGHT"};
+    bool grip_button_was_pressed_left_ = false;
+    bool grip_button_was_pressed_right_ = false;
+
+    // 平移测试记录
+    struct DirectionTestData {
+        bool is_recording = false;
+        VRControllerData start_pose;
+        VRControllerData current_pose;
+        VRControllerData max_displacement;
+        int sample_count = 0;
+        std::string direction;
+
+        void reset() {
+            is_recording = false;
+            sample_count = 0;
+            max_displacement = VRControllerData();
+        }
+    };
+    DirectionTestData direction_test_;
+
+    // Open debug log file
+    void openLogFile() {
+        auto now = std::chrono::system_clock::now();
+        auto time_t_now = std::chrono::system_clock::to_time_t(now);
+        std::tm* tm_now = std::localtime(&time_t_now);
+        
+        char filename[128];
+        snprintf(filename, sizeof(filename), "/tmp/controller_debug_%04d%02d%02d_%02d%02d%02d.log",
+                 tm_now->tm_year + 1900, tm_now->tm_mon + 1, tm_now->tm_mday,
+                 tm_now->tm_hour, tm_now->tm_min, tm_now->tm_sec);
+        
+        log_file_.open(filename, std::ios::out | std::ios::app);
+        if (log_file_.is_open()) {
+            RCLCPP_INFO(this->get_logger(), "调试日志文件已打开: %s", filename);
+            log_file_ << "========================================\n";
+            log_file_ << "VR Controller Debug Log\n";
+            log_file_ << "========================================\n\n";
+        } else {
+            RCLCPP_ERROR(this->get_logger(), "无法打开调试日志文件: %s", filename);
+        }
+    }
+
+    // Log controller data to file
+    void logControllerDataToFile(const VRControllerData& absData, const VRControllerData& relData) {
+        if (!log_file_.is_open() || !enable_debug_logging_) return;
+        
+        ControllerRole role = static_cast<ControllerRole>(absData.role);
+        std::string controller_name = (role == ControllerRole::Left) ? "LEFT" : "RIGHT";
+        
+        log_file_ << "----------------------------------------\n";
+        log_file_ << "时间: " << absData.time << "\n";
+        log_file_ << "手柄: " << controller_name << "\n";
+        log_file_ << "测试方向: " << current_test_direction_ << "\n\n";
+        
+        // Absolute pose (VR原始坐标系)
+        log_file_ << "绝对位置 (VR坐标系):\n";
+        log_file_ << "  Position: x=" << absData.pose_x 
+                  << ", y=" << absData.pose_y 
+                  << ", z=" << absData.pose_z << "\n";
+        log_file_ << "  Rotation: qx=" << absData.pose_qx 
+                  << ", qy=" << absData.pose_qy 
+                  << ", qz=" << absData.pose_qz 
+                  << ", qw=" << absData.pose_qw << "\n\n";
+        
+        // Relative pose (VR原始坐标系)
+        log_file_ << "相对位置 (VR坐标系):\n";
+        log_file_ << "  Position: x=" << relData.pose_x 
+                  << ", y=" << relData.pose_y 
+                  << ", z=" << relData.pose_z << "\n";
+        log_file_ << "  Rotation: qx=" << relData.pose_qx 
+                  << ", qy=" << relData.pose_qy 
+                  << ", qz=" << relData.pose_qz 
+                  << ", qw=" << relData.pose_qw << "\n\n";
+        
+        // ROS coordinate system (transformed)
+        log_file_ << "绝对位置 (ROS坐标系 - 转换后):\n";
+        log_file_ << "  Position: x=" << (VRConfig::COORD_TRANSFORM_NEG * absData.pose_z)
+                  << ", y=" << (VRConfig::COORD_TRANSFORM_NEG * absData.pose_x)
+                  << ", z=" << absData.pose_y << "\n";
+        log_file_ << "  Rotation: qx=" << (VRConfig::COORD_TRANSFORM_NEG * absData.pose_qz)
+                  << ", qy=" << (VRConfig::COORD_TRANSFORM_NEG * absData.pose_qx)
+                  << ", qz=" << absData.pose_qy
+                  << ", qw=" << absData.pose_qw << "\n\n";
+        
+        // Button states
+        log_file_ << "按钮状态:\n";
+        log_file_ << "  Trigger: " << absData.trigger_button 
+                  << " (value: " << absData.trigger << ")\n";
+        log_file_ << "  Grip: " << absData.grip_button << "\n";
+        log_file_ << "  Menu: " << absData.menu_button << "\n";
+        log_file_ << "  Trackpad: button=" << absData.trackpad_button 
+                  << ", touch=" << absData.trackpad_touch
+                  << ", x=" << absData.trackpad_x 
+                  << ", y=" << absData.trackpad_y << "\n";
+        
+        log_file_ << "\n" << std::flush;
+    }
+
+    // 开始方向测试记录
+    void startDirectionTest(const VRControllerData& pose) {
+        direction_test_.is_recording = true;
+        direction_test_.start_pose = pose;
+        direction_test_.current_pose = pose;
+        direction_test_.direction = current_test_direction_;
+        direction_test_.sample_count = 0;
+        direction_test_.max_displacement = VRControllerData();
+
+        RCLCPP_INFO(this->get_logger(), "\n");
+        RCLCPP_INFO(this->get_logger(), "▶▶▶ 开始记录 [%s] 方向测试 ◀◀◀", current_test_direction_.c_str());
+        RCLCPP_INFO(this->get_logger(), "起始位置 (VR): x=%.4f, y=%.4f, z=%.4f",
+                    pose.pose_x, pose.pose_y, pose.pose_z);
+        RCLCPP_INFO(this->get_logger(), "起始位置 (ROS): x=%.4f, y=%.4f, z=%.4f",
+                    VRConfig::COORD_TRANSFORM_NEG * pose.pose_z,
+                    VRConfig::COORD_TRANSFORM_NEG * pose.pose_x,
+                    pose.pose_y);
+
+        if (log_file_.is_open()) {
+            log_file_ << "\n================== 方向测试开始 ==================\n";
+            log_file_ << "测试方向: " << current_test_direction_ << "\n";
+            log_file_ << "起始位置 (VR坐标系): x=" << pose.pose_x
+                      << ", y=" << pose.pose_y << ", z=" << pose.pose_z << "\n";
+            log_file_ << "起始位置 (ROS坐标系): x=" << (VRConfig::COORD_TRANSFORM_NEG * pose.pose_z)
+                      << ", y=" << (VRConfig::COORD_TRANSFORM_NEG * pose.pose_x)
+                      << ", z=" << pose.pose_y << "\n";
+            log_file_ << "---------------------------------------------------\n";
+            log_file_.flush();
+        }
+    }
+
+    // 更新方向测试数据
+    void updateDirectionTest(const VRControllerData& pose) {
+        if (!direction_test_.is_recording) return;
+
+        direction_test_.current_pose = pose;
+        direction_test_.sample_count++;
+
+        // 计算相对于起始位置的位移 (VR坐标系)
+        double dx_vr = pose.pose_x - direction_test_.start_pose.pose_x;
+        double dy_vr = pose.pose_y - direction_test_.start_pose.pose_y;
+        double dz_vr = pose.pose_z - direction_test_.start_pose.pose_z;
+
+        // 转换到ROS坐标系
+        double dx_ros = VRConfig::COORD_TRANSFORM_NEG * dz_vr;  // ROS X = -VR Z
+        double dy_ros = VRConfig::COORD_TRANSFORM_NEG * dx_vr;  // ROS Y = -VR X
+        double dz_ros = dy_vr;                                   // ROS Z = VR Y
+
+        // 每10个样本输出一次实时数据
+        if (direction_test_.sample_count % 10 == 0) {
+            RCLCPP_INFO(this->get_logger(), "[%s] 位移(ROS): dx=%.4f, dy=%.4f, dz=%.4f | 样本数: %d",
+                        current_test_direction_.c_str(), dx_ros, dy_ros, dz_ros,
+                        direction_test_.sample_count);
+        }
+
+        // 记录到日志文件
+        if (log_file_.is_open() && direction_test_.sample_count % 5 == 0) {
+            log_file_ << "样本 #" << direction_test_.sample_count
+                      << " | 位移(ROS): dx=" << dx_ros << ", dy=" << dy_ros << ", dz=" << dz_ros << "\n";
+        }
+    }
+
+    // 结束方向测试并输出摘要
+    void endDirectionTest() {
+        if (!direction_test_.is_recording) return;
+
+        const auto& start = direction_test_.start_pose;
+        const auto& end = direction_test_.current_pose;
+
+        // VR坐标系位移
+        double dx_vr = end.pose_x - start.pose_x;
+        double dy_vr = end.pose_y - start.pose_y;
+        double dz_vr = end.pose_z - start.pose_z;
+
+        // ROS坐标系位移
+        double dx_ros = VRConfig::COORD_TRANSFORM_NEG * dz_vr;
+        double dy_ros = VRConfig::COORD_TRANSFORM_NEG * dx_vr;
+        double dz_ros = dy_vr;
+
+        double total_displacement = std::sqrt(dx_ros*dx_ros + dy_ros*dy_ros + dz_ros*dz_ros);
+
+        // 输出测试摘要到控制台
+        RCLCPP_INFO(this->get_logger(), "\n");
+        RCLCPP_INFO(this->get_logger(), "╔══════════════════════════════════════════════════════════╗");
+        RCLCPP_INFO(this->get_logger(), "║          [%s] 方向测试完成                              ║",
+                    direction_test_.direction.c_str());
+        RCLCPP_INFO(this->get_logger(), "╠══════════════════════════════════════════════════════════╣");
+        RCLCPP_INFO(this->get_logger(), "║  样本数量: %-44d ║", direction_test_.sample_count);
+        RCLCPP_INFO(this->get_logger(), "╠══════════════════════════════════════════════════════════╣");
+        RCLCPP_INFO(this->get_logger(), "║  VR坐标系位移:                                           ║");
+        RCLCPP_INFO(this->get_logger(), "║    dx = %+.4f                                           ║", dx_vr);
+        RCLCPP_INFO(this->get_logger(), "║    dy = %+.4f                                           ║", dy_vr);
+        RCLCPP_INFO(this->get_logger(), "║    dz = %+.4f                                           ║", dz_vr);
+        RCLCPP_INFO(this->get_logger(), "╠══════════════════════════════════════════════════════════╣");
+        RCLCPP_INFO(this->get_logger(), "║  ROS坐标系位移 (机器人坐标系):                           ║");
+        RCLCPP_INFO(this->get_logger(), "║    dx = %+.4f (前后方向, +为前)                         ║", dx_ros);
+        RCLCPP_INFO(this->get_logger(), "║    dy = %+.4f (左右方向, +为左)                         ║", dy_ros);
+        RCLCPP_INFO(this->get_logger(), "║    dz = %+.4f (上下方向, +为上)                         ║", dz_ros);
+        RCLCPP_INFO(this->get_logger(), "╠══════════════════════════════════════════════════════════╣");
+        RCLCPP_INFO(this->get_logger(), "║  总位移距离: %.4f 米                                    ║", total_displacement);
+        RCLCPP_INFO(this->get_logger(), "╚══════════════════════════════════════════════════════════╝");
+        RCLCPP_INFO(this->get_logger(), "\n");
+
+        // 输出到日志文件
+        if (log_file_.is_open()) {
+            log_file_ << "\n================== 方向测试摘要 ==================\n";
+            log_file_ << "测试方向: " << direction_test_.direction << "\n";
+            log_file_ << "样本数量: " << direction_test_.sample_count << "\n\n";
+
+            log_file_ << "起始位置 (VR): x=" << start.pose_x << ", y=" << start.pose_y << ", z=" << start.pose_z << "\n";
+            log_file_ << "结束位置 (VR): x=" << end.pose_x << ", y=" << end.pose_y << ", z=" << end.pose_z << "\n\n";
+
+            log_file_ << "VR坐标系位移:\n";
+            log_file_ << "  dx = " << dx_vr << "\n";
+            log_file_ << "  dy = " << dy_vr << "\n";
+            log_file_ << "  dz = " << dz_vr << "\n\n";
+
+            log_file_ << "ROS坐标系位移 (机器人坐标系):\n";
+            log_file_ << "  dx = " << dx_ros << " (前后方向, +为前)\n";
+            log_file_ << "  dy = " << dy_ros << " (左右方向, +为左)\n";
+            log_file_ << "  dz = " << dz_ros << " (上下方向, +为上)\n\n";
+
+            log_file_ << "总位移距离: " << total_displacement << " 米\n";
+            log_file_ << "=================================================\n\n";
+            log_file_.flush();
+        }
+
+        direction_test_.reset();
+    }
 
     // Initialize socket address structure for TCP connection
     void setupSocket() {
@@ -221,11 +456,19 @@ public:
         setupSocket();
         tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
         createPublishers();
+        openLogFile();
     }
 
     ~VRControllerClient() {
         if (sock != -1) {
             close(sock);
+        }
+        if (log_file_.is_open()) {
+            log_file_ << "\n========================================\n";
+            log_file_ << "Log session ended\n";
+            log_file_ << "========================================\n";
+            log_file_.close();
+            RCLCPP_INFO(this->get_logger(), "调试日志文件已关闭");
         }
     }
 
@@ -276,10 +519,25 @@ public:
         // Publish to the controller data topic with role-specific frame_ids
         controller_data_publisher_->publish(msg);
         
-        // For debugging
+        // Log to file with detailed information
+        logControllerDataToFile(absoluteData, relativeData);
+        
+        // For debugging - detailed console output
         ControllerRole role = static_cast<ControllerRole>(absoluteData.role);
         std::string prefix = (role == ControllerRole::Left) ? "left_vr" : "right_vr";
-        RCLCPP_DEBUG(this->get_logger(), "Published controller data for %s controller", prefix.c_str());
+        
+        // Print detailed info to console
+        RCLCPP_INFO(this->get_logger(), "========== [%s] 控制器数据发布 ==========", prefix.c_str());
+        RCLCPP_INFO(this->get_logger(), "测试方向: %s", current_test_direction_.c_str());
+        RCLCPP_INFO(this->get_logger(), "VR坐标系 - 绝对位置: x=%.4f, y=%.4f, z=%.4f", 
+                    absoluteData.pose_x, absoluteData.pose_y, absoluteData.pose_z);
+        RCLCPP_INFO(this->get_logger(), "VR坐标系 - 相对位置: x=%.4f, y=%.4f, z=%.4f", 
+                    relativeData.pose_x, relativeData.pose_y, relativeData.pose_z);
+        RCLCPP_INFO(this->get_logger(), "ROS坐标系 - 绝对位置: x=%.4f, y=%.4f, z=%.4f", 
+                    VRConfig::COORD_TRANSFORM_NEG * absoluteData.pose_z,
+                    VRConfig::COORD_TRANSFORM_NEG * absoluteData.pose_x,
+                    absoluteData.pose_y);
+        RCLCPP_INFO(this->get_logger(), "==========================================\n");
     }
 
     // Helper method to get a topic name based on controller role
@@ -331,12 +589,20 @@ public:
             // Trigger button just pressed
             initialPose = filteredPose;
             triggerButtonPressed = true;
-            RCLCPP_DEBUG(this->get_logger(), "[%s] Trigger pressed - setting initial pose", 
+            RCLCPP_DEBUG(this->get_logger(), "[%s] Trigger pressed - setting initial pose",
                         (filteredPose.role == VRConfig::LEFT_CONTROLLER_ROLE) ? "LEFT" : "RIGHT");
+
+            // 开始方向测试记录 (如果当前有选择测试方向)
+            if (current_test_direction_ != "NONE") {
+                startDirectionTest(filteredPose);
+            }
         } else if (!filteredPose.trigger_button && triggerButtonPressed) {
             triggerButtonPressed = false;
-            RCLCPP_DEBUG(this->get_logger(), "[%s] Trigger released", 
+            RCLCPP_DEBUG(this->get_logger(), "[%s] Trigger released",
                         (filteredPose.role == VRConfig::LEFT_CONTROLLER_ROLE) ? "LEFT" : "RIGHT");
+
+            // 结束方向测试记录
+            endDirectionTest();
         }
 
         if (triggerButtonPressed) {
@@ -344,6 +610,9 @@ public:
             relativePose = calculateRelativePose(initialPose, filteredPose);
             publishTransform(relativePose, true);   // isRelative = true
             publishTransform(filteredPose);         // Publish absolute transform as well
+
+            // 更新方向测试数据
+            updateDirectionTest(filteredPose);
         } else {
             // Publish the absolute transform
             publishTransform(filteredPose);
@@ -358,6 +627,72 @@ public:
             RCLCPP_DEBUG(this->get_logger(), "[%s] Menu pressed - resetting initial pose", 
                         (filteredPose.role == VRConfig::LEFT_CONTROLLER_ROLE) ? "LEFT" : "RIGHT");
         }
+    }
+
+    void handleGripButton(const VRControllerData& filteredPose) {
+        // Handle direction switching with grip button
+        bool& grip_was_pressed = (filteredPose.role == VRConfig::LEFT_CONTROLLER_ROLE) ? 
+                                  grip_button_was_pressed_left_ : grip_button_was_pressed_right_;
+        
+        if (filteredPose.grip_button && !grip_was_pressed) {
+            // Grip button just pressed - switch to next direction
+            direction_index_ = (direction_index_ + 1) % test_directions_.size();
+            current_test_direction_ = test_directions_[direction_index_];
+            grip_was_pressed = true;
+            
+            RCLCPP_INFO(this->get_logger(), "\n");
+            RCLCPP_INFO(this->get_logger(), "╔════════════════════════════════════════╗");
+            RCLCPP_INFO(this->get_logger(), "║  测试方向已切换: %-20s ║", current_test_direction_.c_str());
+            RCLCPP_INFO(this->get_logger(), "╚════════════════════════════════════════╝");
+            RCLCPP_INFO(this->get_logger(), "\n");
+            
+            // Log direction change to file
+            if (log_file_.is_open()) {
+                log_file_ << "\n************************************************\n";
+                log_file_ << "测试方向切换: " << current_test_direction_ << "\n";
+                log_file_ << "************************************************\n\n";
+                log_file_.flush();
+            }
+        } else if (!filteredPose.grip_button && grip_was_pressed) {
+            grip_was_pressed = false;
+        }
+    }
+
+    void printInstructions() {
+        RCLCPP_INFO(this->get_logger(), "\n");
+        RCLCPP_INFO(this->get_logger(), "╔══════════════════════════════════════════════════════════════════╗");
+        RCLCPP_INFO(this->get_logger(), "║            VR手柄平移测试 - 调试模式                             ║");
+        RCLCPP_INFO(this->get_logger(), "╠══════════════════════════════════════════════════════════════════╣");
+        RCLCPP_INFO(this->get_logger(), "║  坐标系说明 (ROS标准):                                           ║");
+        RCLCPP_INFO(this->get_logger(), "║    X轴: 前(+) / 后(-)                                            ║");
+        RCLCPP_INFO(this->get_logger(), "║    Y轴: 左(+) / 右(-)                                            ║");
+        RCLCPP_INFO(this->get_logger(), "║    Z轴: 上(+) / 下(-)                                            ║");
+        RCLCPP_INFO(this->get_logger(), "╠══════════════════════════════════════════════════════════════════╣");
+        RCLCPP_INFO(this->get_logger(), "║  按键说明:                                                       ║");
+        RCLCPP_INFO(this->get_logger(), "║  ▶ Grip按钮: 切换测试方向                                       ║");
+        RCLCPP_INFO(this->get_logger(), "║  ▶ Trigger按钮: 按住开始记录，松开结束并显示摘要                ║");
+        RCLCPP_INFO(this->get_logger(), "║  ▶ Menu按钮: 重置初始位置                                       ║");
+        RCLCPP_INFO(this->get_logger(), "╠══════════════════════════════════════════════════════════════════╣");
+        RCLCPP_INFO(this->get_logger(), "║  测试方向 (按Grip切换):                                          ║");
+        RCLCPP_INFO(this->get_logger(), "║    NONE     - 不记录测试数据                                     ║");
+        RCLCPP_INFO(this->get_logger(), "║    FORWARD  - 向前移动手柄 (期望: dx > 0)                        ║");
+        RCLCPP_INFO(this->get_logger(), "║    BACKWARD - 向后移动手柄 (期望: dx < 0)                        ║");
+        RCLCPP_INFO(this->get_logger(), "║    LEFT     - 向左移动手柄 (期望: dy > 0)                        ║");
+        RCLCPP_INFO(this->get_logger(), "║    RIGHT    - 向右移动手柄 (期望: dy < 0)                        ║");
+        RCLCPP_INFO(this->get_logger(), "╠══════════════════════════════════════════════════════════════════╣");
+        RCLCPP_INFO(this->get_logger(), "║  测试步骤:                                                       ║");
+        RCLCPP_INFO(this->get_logger(), "║  1. 按Grip按钮选择要测试的方向 (如 FORWARD)                      ║");
+        RCLCPP_INFO(this->get_logger(), "║  2. 将手柄放在起始位置，按住Trigger按钮                         ║");
+        RCLCPP_INFO(this->get_logger(), "║  3. 保持Trigger按下，向指定方向移动手柄约10-20cm                ║");
+        RCLCPP_INFO(this->get_logger(), "║  4. 松开Trigger，查看测试摘要                                   ║");
+        RCLCPP_INFO(this->get_logger(), "║  5. 重复步骤1-4测试其他方向                                     ║");
+        RCLCPP_INFO(this->get_logger(), "╠══════════════════════════════════════════════════════════════════╣");
+        RCLCPP_INFO(this->get_logger(), "║  话题: /controller_data                                          ║");
+        RCLCPP_INFO(this->get_logger(), "║  日志文件: controller_debug_YYYYMMDD_HHMMSS.log                  ║");
+        RCLCPP_INFO(this->get_logger(), "╚══════════════════════════════════════════════════════════════════╝");
+        RCLCPP_INFO(this->get_logger(), "\n");
+        RCLCPP_INFO(this->get_logger(), ">>> 当前测试方向: %s <<<", current_test_direction_.c_str());
+        RCLCPP_INFO(this->get_logger(), "\n");
     }
 
     void logPerformanceMetrics(const VRControllerData& filteredPose, 
@@ -380,6 +715,9 @@ public:
             establishServerConnection();
         }
         RCLCPP_INFO(this->get_logger(), "Connected to server.");
+        
+        // Print instructions
+        printInstructions();
 
         // Main message processing loop - handles VR data reception and ROS publishing
         char buffer[VRConfig::BUFFER_SIZE] = {0};
@@ -411,6 +749,9 @@ public:
                 // Filter the pose data
                 VRControllerData filteredPose = filterPose(jsonData);
                 VRControllerData relativePose;
+
+                // Handle grip button for direction switching
+                handleGripButton(filteredPose);
 
                 // Handle trigger button logic and transform publishing
                 handleTriggerButton(filteredPose, relativePose);
